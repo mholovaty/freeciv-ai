@@ -1,0 +1,3 @@
+[submodule "freeciv"]
+	path = freeciv
+	url = https://github.com/freeciv/freeciv.git
