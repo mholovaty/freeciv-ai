@@ -14,6 +14,7 @@ input is being read — so a simple \\r\\033[2K + redraw is race-free.
 """
 
 import asyncio
+import fcntl
 import os
 import sys
 import re
@@ -160,10 +161,19 @@ def _ensure_so_capture() -> None:
     _real_stderr = open(real_fd, "w", buffering=1, closefd=True)
     sys.stderr = _real_stderr
 
-    # Redirect fd 2 → pipe write end.
     r_fd, w_fd = os.pipe()
+    # Increase pipe buffer to 1 MB (Linux; F_SETPIPE_SZ capped at
+    # /proc/sys/fs/pipe-max-size, default 1 MB for unprivileged users).
+    _pipe_sz = getattr(fcntl, "F_SETPIPE_SZ", 1031)  # 1031 = F_SETPIPE_SZ on Linux
+    try:
+        fcntl.fcntl(r_fd, _pipe_sz, 1 << 20)
+    except OSError:
+        pass
     os.dup2(w_fd, 2)
     os.close(w_fd)
+    # Non-blocking so a full pipe returns EAGAIN instead of deadlocking
+    # the event loop while it's blocked inside a C call.
+    fcntl.fcntl(2, fcntl.F_SETFL, fcntl.fcntl(2, fcntl.F_GETFL) | os.O_NONBLOCK)
     _r_fd = r_fd
 
     # Install a basic handler so messages emitted before the asyncio task

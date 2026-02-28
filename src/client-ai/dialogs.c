@@ -30,6 +30,9 @@
 /* client */
 #include "control.h"
 
+/* internal action-decision API shared with freeciv_ai.c */
+#include "../freeciv-ai-lib/freeciv_ai_action.h"
+
 /* gui main header */
 #include "gui_stub.h"
 
@@ -134,40 +137,59 @@ void popup_action_selection(struct unit *actor_unit,
                             const struct act_prob *act_probs)
 {
   int actor_id = actor_unit ? actor_unit->id : IDENTITY_NUMBER_ZERO;
+  freeciv_action_decision_t dec;
 
-  /* Log what decision is being presented so the operator can see it
-   * and use 'do_action' / 'go' / 'fortify' CLI commands to respond.
-   * We do NOT auto-execute any action: doing so caused recursive action
-   * queries when movement actions moved the unit into new situations. */
-  if (actor_unit) {
-    int shown = 0;
-    log_normal("Unit %d (%s) needs action decision — available:",
-               actor_id,
-               utype_name_translation(unit_type_get(actor_unit)));
+  dec.actor_id  = actor_id;
+  dec.n_choices = 0;
+
+  if (actor_unit && act_probs) {
     action_iterate(act_id) {
-      if (action_prob_possible(act_probs[act_id])) {
-        if (shown < 5) {
-          log_normal("  [%d] %s", act_id,
-                     action_name_translation(action_by_number(act_id)));
-        }
-        shown++;
+      if (!action_prob_possible(act_probs[act_id])) {
+        continue;
+      }
+      if (dec.n_choices >= 64) {
+        break;
+      }
+
+      freeciv_action_choice_t *c = &dec.choices[dec.n_choices++];
+      c->action_id = act_id;
+      strncpy(c->name,
+              action_name_translation(action_by_number(act_id)),
+              sizeof(c->name) - 1);
+      c->name[sizeof(c->name) - 1] = '\0';
+      c->min_prob = act_probs[act_id].min;
+
+      /* Pre-resolve target_id for this action's target kind. */
+      switch (action_get_target_kind(action_by_number(act_id))) {
+      case ATK_SELF:
+        c->target_id = IDENTITY_NUMBER_ZERO;
+        break;
+      case ATK_TILE:
+      case ATK_EXTRAS:
+      case ATK_STACK:
+        c->target_id = target_tile
+          ? tile_index(target_tile) : IDENTITY_NUMBER_ZERO;
+        break;
+      case ATK_UNIT:
+        c->target_id = target_unit
+          ? target_unit->id : IDENTITY_NUMBER_ZERO;
+        break;
+      case ATK_CITY:
+        c->target_id = target_city
+          ? target_city->id : IDENTITY_NUMBER_ZERO;
+        break;
+      default:
+        c->target_id = IDENTITY_NUMBER_ZERO;
+        break;
       }
     } action_iterate_end;
-    if (shown > 5) {
-      log_normal("  ... and %d more", shown - 5);
-    }
-    if (shown == 0) {
-      log_normal("  (none possible)");
-    }
   }
 
-  /* Release the lock so the client can continue issuing orders.
-   * Do NOT call action_decision_clear_want() here: that sends an SSCS_UNQUEUE
-   * packet which cancels a pending ORDER_ACTION_MOVE step, leaving the unit
-   * frozen mid-order.  The server will resend the action query next time the
-   * unit changes state if one is still needed.
-   * Do NOT call action_selection_next_in_focus(): it would immediately
-   * re-query the same or another unit and restart the popup cycle. */
+  /* Push the decision for the Python REPL to read, then unblock the
+   * client event loop.  action_decision_clear_want() is called later by
+   * freeciv_ai_resolve_action_decision() or
+   * freeciv_ai_cancel_action_decision() once the player has chosen. */
+  freeciv_ai_push_action_decision(&dec);
   action_selection_no_longer_in_progress(actor_id);
 }
 

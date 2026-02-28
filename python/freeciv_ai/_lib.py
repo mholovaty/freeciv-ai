@@ -26,12 +26,19 @@ def _find_header() -> Path:
     )
 
 
-def _cffi_decls(header_text: str) -> str:
+def _cffi_decls(header_text: str, header_dir: Path | None = None) -> str:
     """Strip C-compiler-only constructs and map native types to cffi equivalents."""
+    import re as _re
     lines = []
     for line in header_text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
+            # Inline local #include "..." so CFFI sees all type definitions.
+            m = _re.match(r'#\s*include\s+"([^"]+)"', stripped)
+            if m and header_dir is not None:
+                inc_path = header_dir / m.group(1)
+                if inc_path.exists():
+                    lines.append(_cffi_decls(inc_path.read_text(), header_dir))
             continue
         # Drop extern "C" { and the bare } that closes it
         if stripped in ('extern "C" {', "}"):
@@ -45,7 +52,7 @@ def _cffi_decls(header_text: str) -> str:
     return text
 
 
-ffi.cdef(_cffi_decls(_find_header().read_text()))
+ffi.cdef(_cffi_decls(_find_header().read_text(), _find_header().parent))
 
 
 def _find_so() -> str:

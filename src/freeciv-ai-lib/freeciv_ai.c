@@ -438,6 +438,48 @@ void freeciv_ai_move_unit(int unit_id, enum direction8 dir)
 }
 
 /* ------------------------------------------------------------------ */
+/* Pending action decision (populated by dialogs.c, read by Python)    */
+/* ------------------------------------------------------------------ */
+
+static freeciv_action_decision_t _pending_decision;
+static int _has_pending_decision = 0;
+
+void freeciv_ai_push_action_decision(const freeciv_action_decision_t *dec)
+{
+  if (dec) {
+    _pending_decision = *dec;
+    _has_pending_decision = 1;
+  }
+}
+
+int freeciv_ai_get_action_decision(freeciv_action_decision_t *out)
+{
+  if (!_has_pending_decision || !out) {
+    return 0;
+  }
+  *out = _pending_decision;
+  return 1;
+}
+
+void freeciv_ai_resolve_action_decision(int actor_id, int action_id,
+                                        int target_id)
+{
+  if (_has_pending_decision && _pending_decision.actor_id == actor_id) {
+    _has_pending_decision = 0;
+  }
+  request_do_action((enum gen_action)action_id, actor_id, target_id, 0, "");
+  action_decision_clear_want(actor_id);
+}
+
+void freeciv_ai_cancel_action_decision(int actor_id)
+{
+  if (_has_pending_decision && _pending_decision.actor_id == actor_id) {
+    _has_pending_decision = 0;
+  }
+  action_decision_clear_want(actor_id);
+}
+
+/* ------------------------------------------------------------------ */
 /* Map                                                                  */
 /* ------------------------------------------------------------------ */
 

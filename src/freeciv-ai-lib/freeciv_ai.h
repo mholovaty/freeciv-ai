@@ -190,6 +190,34 @@ int freeciv_ai_get_tile_units(int x, int y,
 int freeciv_ai_get_cities(freeciv_city_t *buf, int max_cities);
 
 /* ------------------------------------------------------------------ */
+/* Interactive action selection                                          */
+/* ------------------------------------------------------------------ */
+
+/* Structs and freeciv_ai_push_action_decision() are in the internal
+ * header so that dialogs.c (in src/client-ai/) can include it without
+ * pulling in all of freeciv_ai.h's Freeciv dependencies. */
+#include "freeciv_ai_action.h"
+
+/*
+ * Returns 1 if an action decision is waiting for player input, else 0.
+ * Copies the pending decision into *out.
+ */
+int freeciv_ai_get_action_decision(freeciv_action_decision_t *out);
+
+/*
+ * Execute action_id from the pending decision and clear the pending flag.
+ * target_id must match the choice's pre-resolved target_id.
+ */
+void freeciv_ai_resolve_action_decision(int actor_id, int action_id,
+                                        int target_id);
+
+/*
+ * Cancel the pending action decision (no action taken).
+ * Tells the server not to queue any action for actor_id.
+ */
+void freeciv_ai_cancel_action_decision(int actor_id);
+
+/* ------------------------------------------------------------------ */
 /* Unit actions                                                          */
 /* ------------------------------------------------------------------ */
 

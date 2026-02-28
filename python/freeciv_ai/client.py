@@ -1,31 +1,6 @@
 """
 High-level Python wrapper around the freeciv_ai CFFI bindings.
 
-Python drives the network event loop via asyncio + freeciv_ai_input().
-freeciv_ai_connect() runs freeciv's client_main() in a ucontext coroutine
-and returns once the connection is established (single-threaded, no threads).
-
-Usage::
-
-    import asyncio
-    from freeciv_ai import FreecivClient, ClientState, setup_logging
-    from freeciv_ai._logging import start_log_tasks
-
-    async def main():
-        setup_logging()
-        await start_log_tasks()
-
-        with FreecivClient() as client:
-            client.init()
-            client.connect(host="localhost", port=5556, username="my-ai")
-
-            while client.in_game:
-                await client.poll(timeout=0.1)
-                if client.can_act:
-                    units = client.get_units()
-                    client.end_turn()
-
-    asyncio.run(main())
 """
 
 import asyncio
@@ -56,26 +31,14 @@ class FreecivClient:
     network event loop through :meth:`poll`.
     """
 
-    def __init__(self, so_path: str | None = None):
+    def __init__(self, so_path: str | None = None, data_path: str | None = None):
         self._lib, self._so_path = load_lib(so_path)
-        self._initialized = False
         self._polling = False  # guard: only one poll() active at a time
         self._poll_task: asyncio.Task | None = None
-
-    def init(self, data_path: str | None = None) -> "FreecivClient":
-        """
-        Initialise the freeciv subsystems.
-
-        Must be called before :meth:`connect`.  ``data_path`` is the path to
-        the ``freeciv/data`` directory.  When omitted, the path is inferred
-        from the location of ``libfreeciv_ai.so`` in the build tree.
-        """
         if data_path is None:
             data_path = find_data_path(self._so_path)
         dp = data_path.encode() if data_path else ffi.NULL
         self._lib.freeciv_ai_init(dp)
-        self._initialized = True
-        return self
 
     def connect(
         self, host: str = "localhost", port: int = 5556, username: str = "ai-player"
@@ -88,9 +51,6 @@ class FreecivClient:
 
         Raises :exc:`ConnectionError` if the server cannot be reached.
         """
-        if not self._initialized:
-            self.init()
-
         ret = self._lib.freeciv_ai_connect(host.encode(), port, username.encode())
         if ret != 0:
             raise ConnectionError(f"Failed to connect to {host}:{port}")
@@ -366,6 +326,41 @@ class FreecivClient:
             unit_id, action_id, target_id, sub_tgt, name.encode()
         )
 
+    def get_action_decision(self) -> dict | None:
+        """
+        Return the pending action decision (if any) as a dict, else None.
+
+        The dict has keys:
+          ``actor_id``  — unit that needs to act
+          ``choices``   — list of dicts with ``action_id``, ``name``,
+                          ``target_id``, ``min_prob``
+        """
+        buf = ffi.new("freeciv_action_decision_t *")
+        if not self._lib.freeciv_ai_get_action_decision(buf):
+            return None
+        choices = []
+        for i in range(buf.n_choices):
+            c = buf.choices[i]
+            choices.append(
+                {
+                    "action_id": c.action_id,
+                    "name": ffi.string(c.name).decode("utf-8", errors="replace"),
+                    "target_id": c.target_id,
+                    "min_prob": c.min_prob,
+                }
+            )
+        return {"actor_id": buf.actor_id, "choices": choices}
+
+    def resolve_action_decision(
+        self, actor_id: int, action_id: int, target_id: int
+    ) -> None:
+        """Execute *action_id* for the pending decision and clear it."""
+        self._lib.freeciv_ai_resolve_action_decision(actor_id, action_id, target_id)
+
+    def cancel_action_decision(self, actor_id: int) -> None:
+        """Cancel the pending action decision (no action taken)."""
+        self._lib.freeciv_ai_cancel_action_decision(actor_id)
+
     @property
     def has_hack(self) -> bool:
         """
@@ -480,8 +475,6 @@ class FreecivClient:
             saves_dir=saves_dir,
         )
 
-        if not self._initialized:
-            self.init()
         self.connect(host="localhost", port=port, username=username)
 
         if auto_start:
