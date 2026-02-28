@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "freeciv-ai"
+version = "0.1.0"
+description = "Python AI client for Freeciv, interfacing with libfreeciv_ai.so via CFFI"
+requires-python = ">=3.10"
+dependencies = ["cffi>=1.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["freeciv_ai*"]

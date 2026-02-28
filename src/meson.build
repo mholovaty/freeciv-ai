@@ -2,3 +2,4 @@
 # We use this path for linking
 freeciv_builddir_path = meson.current_build_dir() / '..' / 'freeciv'
 subdir('client-ai')
+subdir('freeciv-ai-lib')

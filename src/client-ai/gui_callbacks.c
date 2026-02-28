@@ -32,7 +32,7 @@ void gui_insert_client_build_info(char *outbuf, size_t outlen) { }
 
 void gui_add_idle_callback(void (*callback)(void *), void *data)
 {
-  (callback)(data);
+  /* No canvas/rendering in AI client — drop idle rendering callbacks. */
 }
 
 void gui_sound_bell(void)
