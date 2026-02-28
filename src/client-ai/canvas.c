@@ -96,6 +96,17 @@ void gui_canvas_put_curved_line(struct canvas *pcanvas, struct color *pcolor,
 
 }
 
+void gui_get_text_size(int *width, int *height,
+                       enum client_font font, const char *text)
+{
+  if (width != nullptr) {
+    *width = 0;
+  }
+  if (height != nullptr) {
+    *height = 0;
+  }
+}
+
 void gui_canvas_put_text(struct canvas *pcanvas, int canvas_x, int canvas_y,
                          enum client_font font, struct color *pcolor,
                          const char *ptext)

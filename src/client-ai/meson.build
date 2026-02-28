@@ -5,20 +5,29 @@ gettext_dep = dependency('gettext', required: false)
 lua_dep = dependency(
   'lua5.4', 'lua-5.4', 'lua54', 'lua5.3', 'lua-5.3', 'lua53', 'lua', required: false)
 m_dep = meson.get_compiler('c').find_library('m', required: false)
+readline_dep = meson.get_compiler('c').find_library('readline', required: true)
+cairo_dep = dependency('cairo', required: false)
 
 # freeciv build output is in builddir/freeciv (relative to build root)
 executable('freeciv-client-ai',
-  # Core GUI stub implementations (from freeciv/client/gui-stub/)
+
+  freeciv_build,
+  'canvas.c',
+  'dialogs.c',
+  'diplodlg.c',
+  'gui_callbacks.c',
+  'gui_main.c',
+  'optiondlg.c',
+  'repodlgs.c',
+  'sprite.c',
+
   '../../freeciv/client/gui_cbsetter.c',
   '../../freeciv/client/gui_interface.c',
-  '../../freeciv/client/gui-stub/canvas.c',
   '../../freeciv/client/gui-stub/chatline.c',
   '../../freeciv/client/gui-stub/citydlg.c',
   '../../freeciv/client/gui-stub/cityrep.c',
   '../../freeciv/client/gui-stub/colors.c',
   '../../freeciv/client/gui-stub/connectdlg.c',
-  '../../freeciv/client/gui-stub/dialogs.c',
-  '../../freeciv/client/gui-stub/diplodlg.c',
   '../../freeciv/client/gui-stub/finddlg.c',
   '../../freeciv/client/gui-stub/gotodlg.c',
   '../../freeciv/client/gui-stub/graphics.c',
@@ -31,19 +40,13 @@ executable('freeciv-client-ai',
   '../../freeciv/client/gui-stub/menu.c',
   '../../freeciv/client/gui-stub/messagedlg.c',
   '../../freeciv/client/gui-stub/messagewin.c',
-  '../../freeciv/client/gui-stub/optiondlg.c',
   '../../freeciv/client/gui-stub/pages.c',
   '../../freeciv/client/gui-stub/plrdlg.c',
   '../../freeciv/client/gui-stub/ratesdlg.c',
-  '../../freeciv/client/gui-stub/repodlgs.c',
   '../../freeciv/client/gui-stub/spaceshipdlg.c',
-  '../../freeciv/client/gui-stub/sprite.c',
   '../../freeciv/client/gui-stub/themes.c',
   '../../freeciv/client/gui-stub/voteinfo_bar.c',
   '../../freeciv/client/gui-stub/wldlg.c',
-
-  'gui_main.c',
-  'editgui_stubs.c',
 
   include_directories: [
     '../../freeciv/client',
@@ -74,7 +77,7 @@ executable('freeciv-client-ai',
     '-lfreeciv',
   ],
 
-  dependencies: [audio_dep, net_dep, gettext_dep, lua_dep, m_dep],
+  dependencies: [audio_dep, net_dep, gettext_dep, lua_dep, m_dep, readline_dep, cairo_dep],
 
   install: true,
   build_rpath: freeciv_builddir_path,
