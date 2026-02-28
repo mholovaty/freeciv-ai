@@ -8,19 +8,12 @@ meson-logs/
 *.so
 *.so.*
 
-# Dependencies and libraries
-freeciv/buildfreeciv/
-
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
-.DS_Store
-Thumbs.db
 
 # Python/Meson cache
 __pycache__/
@@ -29,4 +22,3 @@ __pycache__/
 
 # User-specific
 .user
-
