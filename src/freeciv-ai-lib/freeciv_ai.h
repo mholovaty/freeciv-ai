@@ -38,6 +38,45 @@ typedef struct {
 } freeciv_unit_t;
 
 /*
+ * Plain-C snapshot of a map tile.
+ * known: 0=TILE_UNKNOWN, 1=TILE_KNOWN_UNSEEN, 2=TILE_KNOWN_SEEN
+ * index: tile index — pass as target_id to freeciv_ai_do_action() for
+ *        tile-targeted actions (UNIT_MOVE, FOUND_CITY, FORTIFY, …).
+ * owner: player index of owning player, -1 if none.
+ * city_id: id of city on this tile, -1 if none.
+ * n_units: number of units currently on this tile.
+ * extras: bitmask of extra types present (first 32).
+ */
+typedef struct {
+  int x, y;
+  int index;
+  int known;
+  char terrain[32];
+  int owner;
+  int city_id;
+  char city_name[64];
+  int n_units;
+  unsigned int extras;
+} freeciv_tile_t;
+
+/*
+ * Plain-C snapshot of a city.
+ * owner: player index.
+ * size: city size (population class).
+ * food_surplus / prod_surplus / trade: per-turn values.
+ */
+typedef struct {
+  int id;
+  char name[64];
+  int x, y;
+  int owner;
+  int size;
+  int food_surplus;
+  int prod_surplus;
+  int trade;
+} freeciv_city_t;
+
+/*
  * Initialize the library.  Must be called before freeciv_ai_connect().
  * data_path: path to the freeciv/data directory, or NULL to rely on the
  *            FREECIV_DATA_PATH environment variable.
@@ -111,6 +150,75 @@ bool freeciv_ai_has_hack(void);
 
 /* Disconnect from the server and clean up. */
 void freeciv_ai_stop(void);
+
+/* ------------------------------------------------------------------ */
+/* Map                                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Map dimensions. */
+int freeciv_ai_map_width(void);
+int freeciv_ai_map_height(void);
+
+/*
+ * Convert (x, y) to a tile index suitable as target_id in
+ * freeciv_ai_do_action() and freeciv_ai_can_do_action().
+ * Returns -1 for invalid coordinates.
+ */
+int freeciv_ai_tile_index(int x, int y);
+
+/*
+ * Fill buf with up to max_tiles tile snapshots for all tiles.
+ * Returns the number of entries written.
+ */
+int freeciv_ai_get_tiles(freeciv_tile_t *buf, int max_tiles);
+
+/*
+ * Fill buf with up to max_units unit snapshots for every unit on
+ * tile (x, y).  Returns the number of entries written.
+ */
+int freeciv_ai_get_tile_units(int x, int y,
+                               freeciv_unit_t *buf, int max_units);
+
+/* ------------------------------------------------------------------ */
+/* Cities                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Fill buf with up to max_cities city snapshots for the local player.
+ * Returns the number of entries written.
+ */
+int freeciv_ai_get_cities(freeciv_city_t *buf, int max_cities);
+
+/* ------------------------------------------------------------------ */
+/* Unit actions                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Check whether unit_id can perform action_id against target_id.
+ *
+ * The meaning of target_id depends on the action's target kind:
+ *   ATK_SELF  — target_id is ignored
+ *   ATK_TILE / ATK_EXTRAS / ATK_STACK — target_id is a tile index
+ *     (obtain with freeciv_ai_tile_index(x,y))
+ *   ATK_UNIT  — target_id is a unit id
+ *   ATK_CITY  — target_id is a city id
+ *
+ * Returns the minimum action-success probability (0–200, where 200 =
+ * certain), or -1 when the action is impossible / invalid.
+ */
+int freeciv_ai_can_do_action(int unit_id, int action_id, int target_id);
+
+/*
+ * Ask the server to perform action_id with actor unit_id against target_id.
+ *
+ * sub_tgt: sub-target (tech id, building id, etc.) — 0 for most actions.
+ * name:    city/unit name for actions that require one (e.g. FOUND_CITY);
+ *          pass NULL or "" otherwise.
+ *
+ * The target_id semantics are the same as for freeciv_ai_can_do_action().
+ */
+void freeciv_ai_do_action(int unit_id, int action_id, int target_id,
+                           int sub_tgt, const char *name);
 
 #ifdef __cplusplus
 }

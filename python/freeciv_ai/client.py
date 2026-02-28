@@ -29,17 +29,22 @@ Usage::
 """
 
 import asyncio
+import logging
 from enum import IntEnum
 
 from ._lib import ffi, load_lib, find_data_path
 
 
+_logger = logging.getLogger(__name__)
+
+
 class ClientState(IntEnum):
     """Mirrors freeciv's enum client_states."""
-    INITIAL      = 0   # C_S_INITIAL      — client boot / just started
-    DISCONNECTED = 1   # C_S_DISCONNECTED — not connected (also used for errors)
-    PREPARING    = 2   # C_S_PREPARING    — connected, in pre-game lobby
-    RUNNING      = 3   # C_S_RUNNING      — game in progress
+
+    INITIAL = 0  # C_S_INITIAL      — client boot / just started
+    DISCONNECTED = 1  # C_S_DISCONNECTED — not connected (also used for errors)
+    PREPARING = 2  # C_S_PREPARING    — connected, in pre-game lobby
+    RUNNING = 3  # C_S_RUNNING      — game in progress
 
 
 class FreecivClient:
@@ -51,16 +56,13 @@ class FreecivClient:
     network event loop through :meth:`poll`.
     """
 
-    def __init__(self, so_path: str = None):
+    def __init__(self, so_path: str | None = None):
         self._lib, self._so_path = load_lib(so_path)
         self._initialized = False
         self._polling = False  # guard: only one poll() active at a time
+        self._poll_task: asyncio.Task | None = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def init(self, data_path: str = None) -> "FreecivClient":
+    def init(self, data_path: str | None = None) -> "FreecivClient":
         """
         Initialise the freeciv subsystems.
 
@@ -75,8 +77,9 @@ class FreecivClient:
         self._initialized = True
         return self
 
-    def connect(self, host: str = "localhost", port: int = 5556,
-                username: str = "ai-player") -> "FreecivClient":
+    def connect(
+        self, host: str = "localhost", port: int = 5556, username: str = "ai-player"
+    ) -> "FreecivClient":
         """
         Connect to a Freeciv server.
 
@@ -88,15 +91,19 @@ class FreecivClient:
         if not self._initialized:
             self.init()
 
-        ret = self._lib.freeciv_ai_connect(
-            host.encode(), port, username.encode()
-        )
+        ret = self._lib.freeciv_ai_connect(host.encode(), port, username.encode())
         if ret != 0:
             raise ConnectionError(f"Failed to connect to {host}:{port}")
+        loop = asyncio.get_running_loop()
+        if self._poll_task is None:
+            self._poll_task = loop.create_task(self._poll_loop(), name="freeciv-poll")
         return self
 
     def stop(self) -> None:
         """Disconnect from the server and clean up."""
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
         self._lib.freeciv_ai_stop()
 
     def __enter__(self) -> "FreecivClient":
@@ -105,9 +112,53 @@ class FreecivClient:
     def __exit__(self, *_) -> None:
         self.stop()
 
-    # ------------------------------------------------------------------
-    # State queries
-    # ------------------------------------------------------------------
+    async def poll(self, timeout: float = 0.05) -> bool:
+        """
+        Drive the network event loop for up to *timeout* seconds.
+
+        """
+        fd = self._lib.freeciv_ai_get_socket()
+        if fd < 0:
+            return self.state != ClientState.DISCONNECTED
+
+        # Only one poll() may be active at a time (single-threaded asyncio,
+        # but multiple tasks may call poll() concurrently).
+        if self._polling:
+            await asyncio.sleep(0)
+            return self.state != ClientState.DISCONNECTED
+
+        self._polling = True
+        loop = asyncio.get_running_loop()
+        ev = asyncio.Event()
+
+        def _readable() -> None:
+            loop.remove_reader(fd)
+            self._polling = False
+            ev.set()
+
+        loop.add_reader(fd, _readable)
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            self._lib.freeciv_ai_input(fd)
+        except asyncio.TimeoutError:
+            loop.remove_reader(fd)
+            self._polling = False
+
+        return self.state != ClientState.DISCONNECTED
+
+    async def _poll_loop(self, interval: float = 0.1) -> None:
+        while self.state != ClientState.DISCONNECTED:
+            await self.poll(timeout=interval)
+
+    async def _stop_polling(self) -> None:
+        if self._poll_task is None:
+            return
+        self._poll_task.cancel()
+        try:
+            await self._poll_task
+        except asyncio.CancelledError:
+            pass
+        self._poll_task = None
 
     @property
     def state(self) -> ClientState:
@@ -129,10 +180,6 @@ class FreecivClient:
         """Current game turn number."""
         return self._lib.freeciv_ai_get_turn()
 
-    # ------------------------------------------------------------------
-    # Unit queries
-    # ------------------------------------------------------------------
-
     def get_units(self, max_units: int = 1024) -> list[dict]:
         """
         Return a list of dicts describing every unit owned by the local player.
@@ -144,22 +191,17 @@ class FreecivClient:
         n = self._lib.freeciv_ai_get_units(buf, max_units)
         return [
             {
-                "id":         buf[i].id,
-                "x":          buf[i].x,
-                "y":          buf[i].y,
-                "hp":         buf[i].hp,
-                "hp_max":     buf[i].hp_max,
+                "id": buf[i].id,
+                "x": buf[i].x,
+                "y": buf[i].y,
+                "hp": buf[i].hp,
+                "hp_max": buf[i].hp_max,
                 "moves_left": buf[i].moves_left,
-                "moves_max":  buf[i].moves_max,
-                "type":       ffi.string(buf[i].type_name).decode("utf-8",
-                                                                   errors="replace"),
+                "moves_max": buf[i].moves_max,
+                "type": ffi.string(buf[i].type_name).decode("utf-8", errors="replace"),
             }
             for i in range(n)
         ]
-
-    # ------------------------------------------------------------------
-    # Commands
-    # ------------------------------------------------------------------
 
     def move_unit(self, unit_id: int, direction: int) -> None:
         """
@@ -174,9 +216,155 @@ class FreecivClient:
         """Send a turn-done packet to the server."""
         self._lib.freeciv_ai_end_turn()
 
-    # ------------------------------------------------------------------
-    # Server control (chat / commands)
-    # ------------------------------------------------------------------
+    @property
+    def map_width(self) -> int:
+        """Map width in tiles."""
+        return self._lib.freeciv_ai_map_width()
+
+    @property
+    def map_height(self) -> int:
+        """Map height in tiles."""
+        return self._lib.freeciv_ai_map_height()
+
+    def tile_index(self, x: int, y: int) -> int:
+        """
+        Convert (x, y) coordinates to a tile index.
+
+        The tile index is used as ``target_id`` for tile-targeted actions
+        such as ``ACTION_UNIT_MOVE``, ``ACTION_FORTIFY``,
+        ``ACTION_FOUND_CITY``, etc.  Returns -1 for out-of-bounds coords.
+        """
+        return self._lib.freeciv_ai_tile_index(x, y)
+
+    def get_map(self, max_tiles: int = 131072) -> list[dict]:
+        """
+        Return a list of dicts describing every map tile.
+
+        Each dict has keys: ``x``, ``y``, ``index``, ``known``,
+        ``terrain``, ``owner``, ``city_id``, ``city_name``,
+        ``n_units``, ``extras``.
+
+        ``known`` is 0 (unknown), 1 (seen before but fogged), or
+        2 (currently visible).  ``terrain`` and city fields are empty /
+        -1 for unknown tiles.
+        """
+        buf = ffi.new("freeciv_tile_t[]", max_tiles)
+        n = self._lib.freeciv_ai_get_tiles(buf, max_tiles)
+        result = []
+        for i in range(n):
+            t = buf[i]
+            result.append(
+                {
+                    "x": t.x,
+                    "y": t.y,
+                    "index": t.index,
+                    "known": t.known,
+                    "terrain": ffi.string(t.terrain).decode("utf-8", errors="replace"),
+                    "owner": t.owner,
+                    "city_id": t.city_id,
+                    "city_name": ffi.string(t.city_name).decode(
+                        "utf-8", errors="replace"
+                    ),
+                    "n_units": t.n_units,
+                    "extras": t.extras,
+                }
+            )
+        return result
+
+    def get_tile_units(self, x: int, y: int, max_units: int = 64) -> list[dict]:
+        """
+        Return a list of dicts for every unit on tile (x, y).
+
+        Same fields as :meth:`get_units`.
+        """
+        buf = ffi.new("freeciv_unit_t[]", max_units)
+        n = self._lib.freeciv_ai_get_tile_units(x, y, buf, max_units)
+        return [
+            {
+                "id": buf[i].id,
+                "x": buf[i].x,
+                "y": buf[i].y,
+                "hp": buf[i].hp,
+                "hp_max": buf[i].hp_max,
+                "moves_left": buf[i].moves_left,
+                "moves_max": buf[i].moves_max,
+                "type": ffi.string(buf[i].type_name).decode("utf-8", errors="replace"),
+            }
+            for i in range(n)
+        ]
+
+    def get_cities(self, max_cities: int = 1024) -> list[dict]:
+        """
+        Return a list of dicts describing every city owned by the local player.
+
+        Each dict has keys: ``id``, ``name``, ``x``, ``y``, ``owner``,
+        ``size``, ``food_surplus``, ``prod_surplus``, ``trade``.
+        """
+        buf = ffi.new("freeciv_city_t[]", max_cities)
+        n = self._lib.freeciv_ai_get_cities(buf, max_cities)
+        return [
+            {
+                "id": buf[i].id,
+                "name": ffi.string(buf[i].name).decode("utf-8", errors="replace"),
+                "x": buf[i].x,
+                "y": buf[i].y,
+                "owner": buf[i].owner,
+                "size": buf[i].size,
+                "food_surplus": buf[i].food_surplus,
+                "prod_surplus": buf[i].prod_surplus,
+                "trade": buf[i].trade,
+            }
+            for i in range(n)
+        ]
+
+    def can_do_action(self, unit_id: int, action_id: int, target_id: int = 0) -> int:
+        """
+        Check if *unit_id* can perform *action_id* against *target_id*.
+
+        *target_id* meaning depends on the action:
+
+        * Tile-targeted actions (UNIT_MOVE, FORTIFY, FOUND_CITY, …):
+          pass ``tile_index(x, y)``
+        * Unit-targeted actions (ATTACK, …): pass the target unit id
+        * City-targeted actions: pass the target city id
+        * Self-targeted actions: *target_id* is ignored
+
+        Returns the minimum success probability (0–200, where 200 is
+        certain), or -1 if the action is impossible / invalid.
+        """
+        return self._lib.freeciv_ai_can_do_action(unit_id, action_id, target_id)
+
+    def do_action(
+        self,
+        unit_id: int,
+        action_id: int,
+        target_id: int,
+        sub_tgt: int = 0,
+        name: str = "",
+    ) -> None:
+        """
+        Ask the server to perform *action_id* with unit *unit_id*.
+
+        *target_id* semantics are the same as for :meth:`can_do_action`.
+
+        *sub_tgt*: sub-target (tech id, building id, …) — 0 for most
+        actions.
+
+        *name*: city or unit name for actions that require one (e.g.
+        ``ACTION_FOUND_CITY``); leave empty otherwise.
+
+        Example — move unit 42 to the tile one square north-east::
+
+            idx = client.tile_index(x + 1, y - 1)
+            client.do_action(42, Actions.UNIT_MOVE, idx)
+
+        Example — attack unit 99::
+
+            client.do_action(42, Actions.ATTACK, 99)
+        """
+        self._lib.freeciv_ai_do_action(
+            unit_id, action_id, target_id, sub_tgt, name.encode()
+        )
 
     @property
     def has_hack(self) -> bool:
@@ -228,55 +416,6 @@ class FreecivClient:
         """
         self.send_command("start")
 
-    # ------------------------------------------------------------------
-    # Network event loop (asyncio-driven)
-    # ------------------------------------------------------------------
-
-    async def poll(self, timeout: float = 0.05) -> bool:
-        """
-        Drive the network event loop for up to *timeout* seconds.
-
-        Registers the server socket with asyncio's event loop and awaits
-        readability, then calls ``freeciv_ai_input`` to process the packet.
-        Returns ``True`` if the connection is still alive, ``False`` if
-        disconnected.
-
-        Call this regularly in your main loop to process incoming packets::
-
-            while client.in_game:
-                await client.poll()
-                if client.can_act:
-                    ...
-        """
-        fd = self._lib.freeciv_ai_get_socket()
-        if fd < 0:
-            return self.state != ClientState.DISCONNECTED
-
-        # Only one poll() may be active at a time (single-threaded asyncio,
-        # but multiple tasks may call poll() concurrently).
-        if self._polling:
-            await asyncio.sleep(0)
-            return self.state != ClientState.DISCONNECTED
-
-        self._polling = True
-        loop = asyncio.get_running_loop()
-        ev = asyncio.Event()
-
-        def _readable() -> None:
-            loop.remove_reader(fd)
-            self._polling = False
-            ev.set()
-
-        loop.add_reader(fd, _readable)
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-            self._lib.freeciv_ai_input(fd)
-        except asyncio.TimeoutError:
-            loop.remove_reader(fd)
-            self._polling = False
-
-        return self.state != ClientState.DISCONNECTED
-
     async def wait_for_turn(self) -> None:
         """Await until :attr:`can_act` is ``True``, pumping the event loop."""
         while not self.can_act:
@@ -307,10 +446,11 @@ class FreecivClient:
         aifill: int = 0,
         endturn: int = 0,
         timeout_secs: int = 0,
-        extra_cmds: list[str] = (),
+        extra_cmds: list[str] | None = None,
+        saves_dir: str | None = None,
         username: str = "ai-player",
         auto_start: bool = True,
-    ) -> "FreecivServer":
+    ):
         """
         Start a local ``freeciv-server``, connect to it, and optionally start
         the game — all in one call.
@@ -337,6 +477,7 @@ class FreecivClient:
             endturn=endturn,
             timeout_secs=timeout_secs,
             extra_cmds=extra_cmds,
+            saves_dir=saves_dir,
         )
 
         if not self._initialized:
@@ -345,9 +486,7 @@ class FreecivClient:
 
         if auto_start:
             if not await self.wait_for_hack():
-                logging.getLogger("freeciv_ai.lib").warning(
-                    "Could not obtain hack level — /start may fail"
-                )
+                _logger.warning("Could not obtain hack level — /start may fail")
             self.start_game()
 
         return server

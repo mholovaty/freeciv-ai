@@ -19,6 +19,8 @@ meson-logs/
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+.ruff_cache/
 
 # User-specific
 .user

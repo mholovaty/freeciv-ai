@@ -18,6 +18,14 @@
 /* common */
 #include "game.h"
 #include "government.h"
+#include "actions.h"
+#include "actres.h"
+#include "tile.h"
+#include "map.h"
+#include "unittype.h"
+
+/* utility */
+#include "log.h"
 
 /* client */
 #include "control.h"
@@ -125,7 +133,42 @@ void popup_action_selection(struct unit *actor_unit,
                             struct extra_type *target_extra,
                             const struct act_prob *act_probs)
 {
-  /* PORTME */
+  int actor_id = actor_unit ? actor_unit->id : IDENTITY_NUMBER_ZERO;
+
+  /* Log what decision is being presented so the operator can see it
+   * and use 'do_action' / 'go' / 'fortify' CLI commands to respond.
+   * We do NOT auto-execute any action: doing so caused recursive action
+   * queries when movement actions moved the unit into new situations. */
+  if (actor_unit) {
+    int shown = 0;
+    log_normal("Unit %d (%s) needs action decision — available:",
+               actor_id,
+               utype_name_translation(unit_type_get(actor_unit)));
+    action_iterate(act_id) {
+      if (action_prob_possible(act_probs[act_id])) {
+        if (shown < 5) {
+          log_normal("  [%d] %s", act_id,
+                     action_name_translation(action_by_number(act_id)));
+        }
+        shown++;
+      }
+    } action_iterate_end;
+    if (shown > 5) {
+      log_normal("  ... and %d more", shown - 5);
+    }
+    if (shown == 0) {
+      log_normal("  (none possible)");
+    }
+  }
+
+  /* Release the lock so the client can continue issuing orders.
+   * Do NOT call action_decision_clear_want() here: that sends an SSCS_UNQUEUE
+   * packet which cancels a pending ORDER_ACTION_MOVE step, leaving the unit
+   * frozen mid-order.  The server will resend the action query next time the
+   * unit changes state if one is still needed.
+   * Do NOT call action_selection_next_in_focus(): it would immediately
+   * re-query the same or another unit and restart the popup cycle. */
+  action_selection_no_longer_in_progress(actor_id);
 }
 
 /**********************************************************************//**

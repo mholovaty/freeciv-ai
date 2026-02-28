@@ -31,9 +31,19 @@ class FreecivServer:
         self._port: int | None = None
         self._script_path: str | None = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    async def __aenter__(self) -> "FreecivServer":
+        return self
+
+    async def __aexit__(self, *_) -> None:
+        await self.stop()
+
+    @property
+    def port(self) -> int | None:
+        return self._port
+
+    @property
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.returncode is None
 
     async def start(
         self,
@@ -43,7 +53,8 @@ class FreecivServer:
         aifill: int = 0,
         endturn: int = 0,
         timeout_secs: int = 0,
-        extra_cmds: list[str] = (),
+        extra_cmds: list[str] | None = None,
+        saves_dir: str | None = None,
         wait_timeout: float = 15.0,
     ) -> "FreecivServer":
         """
@@ -63,6 +74,9 @@ class FreecivServer:
             Per-turn time limit in seconds (0 = wait for player).
         extra_cmds:
             Additional server commands run at startup (``/`` prefix optional).
+        saves_dir:
+            Directory passed to ``freeciv-server --saves``.  When *None* the
+            server uses its default save location.
         wait_timeout:
             Seconds to wait for the server to become ready.
 
@@ -77,8 +91,9 @@ class FreecivServer:
             cmds.append(f"/set endturn {endturn}")
         if timeout_secs > 0:
             cmds.append(f"/set timeout {timeout_secs}")
-        for c in extra_cmds:
-            cmds.append(c if c.startswith("/") else f"/{c}")
+        if extra_cmds is not None:
+            for c in extra_cmds:
+                cmds.append(c if c.startswith("/") else f"/{c}")
 
         fd, path = tempfile.mkstemp(suffix=".serv", prefix="freeciv_ai_")
         with os.fdopen(fd, "w") as f:
@@ -88,9 +103,13 @@ class FreecivServer:
 
         self._proc = await asyncio.create_subprocess_exec(
             "freeciv-server",
-            "-p", str(port),
-            "-r", path,
-            "-q", "600",
+            "-p",
+            str(port),
+            "-r",
+            path,
+            "-q",
+            "600",
+            *(["-s", saves_dir] if saves_dir is not None else []),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -137,38 +156,24 @@ class FreecivServer:
         self._proc = None
         self._cleanup_script()
 
+    def force_kill(self) -> None:
+        """
+        Synchronously kill the server process immediately (no graceful quit).
+
+        Safe to call from a ``finally`` block or signal handler where
+        ``await`` is not available.
+        """
+        if self._proc is not None and self._proc.returncode is None:
+            self._proc.kill()
+        self._cleanup_script()
+        self._proc = None
+
     async def send(self, cmd: str) -> None:
         """Send a command to the server's stdin console."""
         if self._proc and self._proc.returncode is None:
             line = cmd if cmd.startswith("/") else f"/{cmd}"
             self._proc.stdin.write((line + "\n").encode())
             await self._proc.stdin.drain()
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def port(self) -> int | None:
-        return self._port
-
-    @property
-    def running(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
-
-    # ------------------------------------------------------------------
-    # Async context manager
-    # ------------------------------------------------------------------
-
-    async def __aenter__(self) -> "FreecivServer":
-        return self
-
-    async def __aexit__(self, *_) -> None:
-        await self.stop()
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     def _cleanup_script(self) -> None:
         if self._script_path and os.path.exists(self._script_path):

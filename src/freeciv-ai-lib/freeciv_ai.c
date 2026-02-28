@@ -40,6 +40,12 @@
 #include "unitlist.h"
 #include "unittype.h"
 #include "player.h"
+#include "actions.h"
+#include "actres.h"
+#include "city.h"
+#include "extras.h"
+#include "tile.h"
+#include "terrain.h"
 
 /* client */
 #include "client_main.h"
@@ -210,6 +216,16 @@ int gui_ui_main(int argc, char *argv[])
    * call tileset_ruleset_reset() have a valid object.  We never load actual
    * graphics, so this stays a lightweight empty shell. */
   tileset_init(tileset);
+
+  /* Use ORDER_MOVE (not ORDER_ACTION_MOVE) for every directional move so
+   * the server never sends a PACKET_UNIT_ACTIONS asking for per-move
+   * confirmation.  The action-selection dialog flow is only needed for
+   * deliberate actions; simple movement should just move. */
+  gui_options.popup_last_move_to_allied = FALSE;
+
+  /* Never ask about "passive" arrival actions (unit walks onto a tile
+   * without explicitly targeting anything). */
+  gui_options.popup_actor_arrival = FALSE;
 
   char errbuf[512];
 
@@ -419,4 +435,229 @@ void freeciv_ai_move_unit(int unit_id, enum direction8 dir)
   if (punit) {
     request_move_unit_direction(punit, dir);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Map                                                                  */
+/* ------------------------------------------------------------------ */
+
+int freeciv_ai_map_width(void)
+{
+  return wld.map.xsize;
+}
+
+int freeciv_ai_map_height(void)
+{
+  return wld.map.ysize;
+}
+
+int freeciv_ai_tile_index(int x, int y)
+{
+  struct tile *ptile = map_pos_to_tile(&wld.map, x, y);
+  return ptile ? tile_index(ptile) : -1;
+}
+
+int freeciv_ai_get_tiles(freeciv_tile_t *buf, int max_tiles)
+{
+  struct player *pplayer = client_player();
+
+  if (!buf || max_tiles <= 0) {
+    return 0;
+  }
+
+  int count = 0;
+  whole_map_iterate(&wld.map, ptile) {
+    if (count >= max_tiles) {
+      break;
+    }
+    freeciv_tile_t *t = &buf[count++];
+    t->x     = index_to_map_pos_x(tile_index(ptile));
+    t->y     = index_to_map_pos_y(tile_index(ptile));
+    t->index = tile_index(ptile);
+
+    enum known_type known = pplayer
+      ? tile_get_known(ptile, pplayer)
+      : TILE_UNKNOWN;
+    t->known = (int)known;
+
+    t->owner = ptile->owner ? player_index(ptile->owner) : -1;
+
+    if (known == TILE_UNKNOWN) {
+      t->terrain[0] = '\0';
+      t->city_id    = -1;
+      t->city_name[0] = '\0';
+      t->n_units    = 0;
+      t->extras     = 0;
+    } else {
+      struct terrain *pterr = tile_terrain(ptile);
+      if (pterr) {
+        strncpy(t->terrain, terrain_rule_name(pterr),
+                sizeof(t->terrain) - 1);
+        t->terrain[sizeof(t->terrain) - 1] = '\0';
+      } else {
+        t->terrain[0] = '\0';
+      }
+
+      struct city *pcity = tile_city(ptile);
+      if (pcity) {
+        t->city_id = pcity->id;
+        strncpy(t->city_name, city_name_get(pcity),
+                sizeof(t->city_name) - 1);
+        t->city_name[sizeof(t->city_name) - 1] = '\0';
+      } else {
+        t->city_id      = -1;
+        t->city_name[0] = '\0';
+      }
+
+      t->n_units = unit_list_size(ptile->units);
+
+      unsigned int extras_mask = 0;
+      extra_type_iterate(pextra) {
+        int idx = extra_index(pextra);
+        if (idx < 32 && tile_has_extra(ptile, pextra)) {
+          extras_mask |= (1u << idx);
+        }
+      } extra_type_iterate_end;
+      t->extras = extras_mask;
+    }
+  } whole_map_iterate_end;
+
+  return count;
+}
+
+int freeciv_ai_get_tile_units(int x, int y,
+                               freeciv_unit_t *buf, int max_units)
+{
+  struct tile *ptile = map_pos_to_tile(&wld.map, x, y);
+  if (!ptile || !buf || max_units <= 0) {
+    return 0;
+  }
+
+  int count = 0;
+  unit_list_iterate(ptile->units, punit) {
+    if (count >= max_units) {
+      break;
+    }
+    freeciv_unit_t *u = &buf[count++];
+    const struct unit_type *ut = unit_type_get(punit);
+    u->id         = punit->id;
+    u->x          = x;
+    u->y          = y;
+    u->hp         = punit->hp;
+    u->hp_max     = ut->hp;
+    u->moves_left = punit->moves_left;
+    u->moves_max  = ut->move_rate;
+    strncpy(u->type_name, utype_name_translation(ut),
+            sizeof(u->type_name) - 1);
+    u->type_name[sizeof(u->type_name) - 1] = '\0';
+  } unit_list_iterate_end;
+
+  return count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Cities                                                               */
+/* ------------------------------------------------------------------ */
+
+int freeciv_ai_get_cities(freeciv_city_t *buf, int max_cities)
+{
+  struct player *pplayer = client_player();
+
+  if (!pplayer || !buf || max_cities <= 0) {
+    return 0;
+  }
+
+  int count = 0;
+  city_list_iterate(pplayer->cities, pcity) {
+    if (count >= max_cities) {
+      break;
+    }
+    freeciv_city_t *c = &buf[count++];
+    c->id = pcity->id;
+    strncpy(c->name, city_name_get(pcity), sizeof(c->name) - 1);
+    c->name[sizeof(c->name) - 1] = '\0';
+
+    struct tile *ctile = city_tile(pcity);
+    c->x = index_to_map_pos_x(tile_index(ctile));
+    c->y = index_to_map_pos_y(tile_index(ctile));
+
+    c->owner        = player_index(pcity->owner);
+    c->size         = city_size_get(pcity);
+    c->food_surplus = pcity->surplus[O_FOOD];
+    c->prod_surplus = pcity->surplus[O_SHIELD];
+    c->trade        = pcity->surplus[O_TRADE];
+  } city_list_iterate_end;
+
+  return count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Unit actions                                                          */
+/* ------------------------------------------------------------------ */
+
+int freeciv_ai_can_do_action(int unit_id, int action_id, int target_id)
+{
+  struct unit *punit = game_unit_by_number(unit_id);
+  if (!punit) {
+    return -1;
+  }
+  if (!gen_action_is_valid((enum gen_action)action_id)) {
+    return -1;
+  }
+
+  struct act_prob prob = ACTPROB_IMPOSSIBLE;
+  enum action_target_kind tgt_kind =
+    action_get_target_kind(action_by_number(action_id));
+
+  switch (tgt_kind) {
+  case ATK_SELF:
+    prob = action_prob_self(&wld.map, punit, action_id);
+    break;
+  case ATK_TILE:
+  case ATK_EXTRAS: {
+    struct tile *ptile = index_to_tile(&wld.map, target_id);
+    if (ptile) {
+      prob = action_prob_vs_tile(&wld.map, punit, action_id, ptile, NULL);
+    }
+    break;
+  }
+  case ATK_UNIT: {
+    struct unit *ptgt = game_unit_by_number(target_id);
+    if (ptgt) {
+      prob = action_prob_vs_unit(&wld.map, punit, action_id, ptgt);
+    }
+    break;
+  }
+  case ATK_STACK: {
+    struct tile *ptile = index_to_tile(&wld.map, target_id);
+    if (ptile) {
+      prob = action_prob_vs_stack(&wld.map, punit, action_id, ptile);
+    }
+    break;
+  }
+  case ATK_CITY: {
+    struct city *pcity = game_city_by_number(target_id);
+    if (pcity) {
+      prob = action_prob_vs_city(&wld.map, punit, action_id, pcity);
+    }
+    break;
+  }
+  default:
+    break;
+  }
+
+  if (!action_prob_possible(prob)) {
+    return -1;
+  }
+  return prob.min;
+}
+
+void freeciv_ai_do_action(int unit_id, int action_id, int target_id,
+                           int sub_tgt, const char *name)
+{
+  if (!gen_action_is_valid((enum gen_action)action_id)) {
+    return;
+  }
+  request_do_action((enum gen_action)action_id, unit_id, target_id,
+                    sub_tgt, name ? name : "");
 }
