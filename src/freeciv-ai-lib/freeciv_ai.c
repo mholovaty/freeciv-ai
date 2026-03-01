@@ -493,6 +493,16 @@ int freeciv_ai_map_height(void)
   return wld.map.ysize;
 }
 
+int freeciv_ai_map_topology_id(void)
+{
+  return wld.map.topology_id;
+}
+
+int freeciv_ai_map_wrap_id(void)
+{
+  return wld.map.wrap_id;
+}
+
 int freeciv_ai_tile_index(int x, int y)
 {
   struct tile *ptile = map_pos_to_tile(&wld.map, x, y);
@@ -628,6 +638,14 @@ int freeciv_ai_get_cities(freeciv_city_t *buf, int max_cities)
     c->food_surplus = pcity->surplus[O_FOOD];
     c->prod_surplus = pcity->surplus[O_SHIELD];
     c->trade        = pcity->surplus[O_TRADE];
+    c->science      = pcity->surplus[O_SCIENCE];
+    c->food_stock   = pcity->food_stock;
+    c->granary_size = city_granary_size(city_size_get(pcity));
+    c->shield_stock = pcity->shield_stock;
+    c->prod_cost    = city_production_build_shield_cost(pcity);
+    const char *pname = city_production_name_translation(pcity);
+    strncpy(c->prod_name, pname ? pname : "", sizeof(c->prod_name) - 1);
+    c->prod_name[sizeof(c->prod_name) - 1] = '\0';
   } city_list_iterate_end;
 
   return count;

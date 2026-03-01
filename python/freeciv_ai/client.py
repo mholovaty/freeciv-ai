@@ -186,6 +186,16 @@ class FreecivClient:
         """Map height in tiles."""
         return self._lib.freeciv_ai_map_height()
 
+    @property
+    def map_topology_id(self) -> int:
+        """Topology bitmask: TF_ISO=1, TF_HEX=2."""
+        return self._lib.freeciv_ai_map_topology_id()
+
+    @property
+    def map_wrap_id(self) -> int:
+        """Wrap bitmask: WRAP_X=1, WRAP_Y=2."""
+        return self._lib.freeciv_ai_map_wrap_id()
+
     def tile_index(self, x: int, y: int) -> int:
         """
         Convert (x, y) coordinates to a tile index.
@@ -258,7 +268,8 @@ class FreecivClient:
         Return a list of dicts describing every city owned by the local player.
 
         Each dict has keys: ``id``, ``name``, ``x``, ``y``, ``owner``,
-        ``size``, ``food_surplus``, ``prod_surplus``, ``trade``.
+        ``size``, ``food_surplus``, ``prod_surplus``, ``trade``, ``science``,
+        ``food_stock``, ``granary_size``, ``shield_stock``, ``prod_cost``, ``prod_name``.
         """
         buf = ffi.new("freeciv_city_t[]", max_cities)
         n = self._lib.freeciv_ai_get_cities(buf, max_cities)
@@ -273,6 +284,12 @@ class FreecivClient:
                 "food_surplus": buf[i].food_surplus,
                 "prod_surplus": buf[i].prod_surplus,
                 "trade": buf[i].trade,
+                "science": buf[i].science,
+                "food_stock": buf[i].food_stock,
+                "granary_size": buf[i].granary_size,
+                "shield_stock": buf[i].shield_stock,
+                "prod_cost": buf[i].prod_cost,
+                "prod_name": ffi.string(buf[i].prod_name).decode("utf-8", errors="replace"),
             }
             for i in range(n)
         ]

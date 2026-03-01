@@ -63,7 +63,10 @@ typedef struct {
  * Plain-C snapshot of a city.
  * owner: player index.
  * size: city size (population class).
- * food_surplus / prod_surplus / trade: per-turn values.
+ * food_surplus / prod_surplus / trade / science: per-turn surpluses.
+ * food_stock / granary_size: food storage towards next growth.
+ * shield_stock / prod_cost: production progress / total cost.
+ * prod_name: name of current production target.
  */
 typedef struct {
   int id;
@@ -74,6 +77,12 @@ typedef struct {
   int food_surplus;
   int prod_surplus;
   int trade;
+  int science;
+  int food_stock;
+  int granary_size;
+  int shield_stock;
+  int prod_cost;
+  char prod_name[64];
 } freeciv_city_t;
 
 /*
@@ -158,6 +167,11 @@ void freeciv_ai_stop(void);
 /* Map dimensions. */
 int freeciv_ai_map_width(void);
 int freeciv_ai_map_height(void);
+
+/* Map topology: bitmask of topo_flag (TF_ISO=1, TF_HEX=2). */
+int freeciv_ai_map_topology_id(void);
+/* Map wrapping: bitmask of wrap_flag (WRAP_X=1, WRAP_Y=2). */
+int freeciv_ai_map_wrap_id(void);
 
 /*
  * Convert (x, y) to a tile index suitable as target_id in

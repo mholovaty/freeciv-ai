@@ -13,8 +13,22 @@ Usage::
 import argparse
 import asyncio
 import logging
+import shutil
+
+from freeciv_ai.map_renderer import (
+    BG_UNKNOWN, FG_BORDER, FG_CONTENT, MAP_RESET,
+    MapCanvas, map_legend, map_pos_to_native,
+    parse_map_range, rpad, render_isohex, render_isohex_centered,
+    terrain_bg, units_panel_lines, visible_len,
+)
 import signal
 import sys
+
+try:
+    import readline as _readline
+    _readline.parse_and_bind("Control-l: clear-screen")
+except ImportError:
+    pass
 
 from freeciv_ai import FreecivClient, FreecivServer, ClientState, setup_logging
 from freeciv_ai._logging import start_log_tasks, stop_log_tasks, set_prompt
@@ -23,27 +37,21 @@ from freeciv_ai.constants import Actions, TileKnown
 log = logging.getLogger("freeciv_ai.lib")
 
 
+
+
+
 async def async_input(prompt: str, stop_event: asyncio.Event | None = None) -> str:
     """
-    Read one line from stdin without blocking the asyncio event loop.
+    Read one line from stdin via input(), which goes through GNU readline so
+    key bindings (Ctrl+L clear-screen, history, etc.) work correctly.
 
     If *stop_event* is provided and becomes set before the user presses Enter,
-    raises ``EOFError`` so the caller can exit cleanly (Ctrl+C support).
+    raises ``EOFError`` so the caller can exit cleanly.
     """
     loop = asyncio.get_running_loop()
-    line_fut: asyncio.Future[str] = loop.create_future()
-
-    def _readable() -> None:
-        loop.remove_reader(sys.stdin.fileno())
-        line = sys.stdin.readline()
-        if not line_fut.done():
-            line_fut.set_result(line)
-
-    sys.stdout.write(prompt)
-    sys.stdout.flush()
     set_prompt(prompt)
-    loop.add_reader(sys.stdin.fileno(), _readable)
     try:
+        line_fut: asyncio.Future[str] = loop.run_in_executor(None, input, prompt)
         if stop_event is not None:
             stop_fut = asyncio.ensure_future(stop_event.wait())
             try:
@@ -54,15 +62,11 @@ async def async_input(prompt: str, stop_event: asyncio.Event | None = None) -> s
             finally:
                 if not stop_fut.done():
                     stop_fut.cancel()
-            if stop_event.is_set() and not line_fut.done():
-                loop.remove_reader(sys.stdin.fileno())
+            if stop_event.is_set() and line_fut not in done:
                 raise EOFError("interrupted by stop_event")
-            return line_fut.result().rstrip("\n")
+            return line_fut.result()
         else:
-            return (await line_fut).rstrip("\n")
-    except asyncio.CancelledError:
-        loop.remove_reader(sys.stdin.fileno())
-        raise
+            return await line_fut
     finally:
         set_prompt("")
 
@@ -195,6 +199,51 @@ def cmd_tile(client: FreecivClient, args: list[str]) -> None:
         print("  Units   : None")
 
 
+def cmd_topology(client: FreecivClient) -> None:
+    topo = client.map_topology_id
+    wrap = client.map_wrap_id
+    flags = []
+    if topo & 1:
+        flags.append("ISO")
+    if topo & 2:
+        flags.append("Hex")
+    wrapping = []
+    if wrap & 1:
+        wrapping.append("X")
+    if wrap & 2:
+        wrapping.append("Y")
+    print(f"=== Map Topology ===")
+    print(f"  Size     : {client.map_width}×{client.map_height}")
+    print(f"  Topology : {', '.join(flags) or 'Flat'} (id={topo})")
+    print(f"  Wrapping : {'Wrap' + '+'.join(wrapping) if wrapping else 'None'} (id={wrap})")
+
+
+def _city_line(c: dict) -> str:
+    """One-line summary of a city for panel / list display."""
+    job = (f"{c['shield_stock']}/{c['prod_cost']} {c['prod_name']}"
+           if c.get("prod_name") else "idle")
+    food_bar = f"{c['food_stock']}/{c['granary_size']}"
+    return (
+        f"[{c['id']:4d}] {c['name']:16s}"
+        f" sz{c['size']}"
+        f" \033[32mfd{c['food_surplus']:+d}\033[0m({food_bar})"
+        f" \033[33msh{c['prod_surplus']:+d}\033[0m"
+        f" \033[36msc{c['science']:+d}\033[0m"
+        f" tr{c['trade']:+d}"
+        f"  [{job}]"
+    )
+
+
+def cities_panel_lines(cities: list[dict]) -> list[str]:
+    """Format cities as a list of strings for the display panel."""
+    if not cities:
+        return ["(no cities)"]
+    lines = [f"=== Cities ({len(cities)}) ==="]
+    for c in cities:
+        lines.append(_city_line(c))
+    return lines
+
+
 def cmd_cities(client: FreecivClient) -> None:
     cities = client.get_cities()
     if not cities:
@@ -202,14 +251,179 @@ def cmd_cities(client: FreecivClient) -> None:
         return
     print(f"=== Your cities ({len(cities)}) ===")
     for c in cities:
-        print(
-            f"  [{c['id']:5d}] {c['name']:20s}  "
-            f"({c['x']:3d},{c['y']:3d})  "
-            f"size {c['size']}  "
-            f"food {c['food_surplus']:+d}  "
-            f"prod {c['prod_surplus']:+d}  "
-            f"trade {c['trade']:+d}"
-        )
+        print(_city_line(c))
+
+
+def _wrapped_avg(values: list[int], size: int) -> int:
+    """Wrap-aware average — correct across the seam (e.g. x=0 and x=15 → 15/0 not 7)."""
+    ref = values[0]
+    adjusted = []
+    for v in values:
+        d = (v - ref) % size
+        if d > size // 2:
+            d -= size
+        adjusted.append(ref + d)
+    return round(sum(adjusted) / len(adjusted)) % size
+
+
+def _init_map_center(client: "FreecivClient") -> None:
+    """Set _map_center to the wrap-aware native-coord average of player units."""
+    global _map_center
+    units = client.get_units()
+    if not units:
+        return
+    map_w = client.map_width
+    map_h = client.map_height
+    nat_xs, nat_ys = [], []
+    for u in units:
+        nx, ny = map_pos_to_native(u["x"], u["y"], map_w)
+        nat_xs.append(nx)
+        nat_ys.append(ny)
+    _map_center = (_wrapped_avg(nat_xs, map_w), _wrapped_avg(nat_ys, map_h))
+
+
+def cmd_map(client: FreecivClient, args: list[str]) -> None:
+    """map [x1:x2 y1:y2] | map center <x> <y> | map legend"""
+    if args and args[0] == "legend":
+        print(map_legend())
+        return
+
+    topo = client.map_topology_id
+    if topo != 3:
+        print(f"map command only supports iso-hex topology (id=3); current id={topo}.")
+        return
+
+    global _map_center
+
+    tiles = client.get_map()
+    units = client.get_units()
+
+    # Handle "map center [x y]" — set/query persistent view centre
+    if args and args[0] == "center":
+        coord_tokens = [a.rstrip(",") for a in args[1:] if a.rstrip(",")]
+        if len(coord_tokens) >= 2:
+            try:
+                _map_center = (int(coord_tokens[0]), int(coord_tokens[1]))
+            except ValueError:
+                print("x and y must be integers.")
+                return
+        elif len(coord_tokens) == 0 and _map_center is None:
+            print("Centre not set. Usage: map center <x> <y>")
+            return
+        # render centred (using existing or newly set centre)
+        cx, cy = _map_center  # type: ignore[misc]
+        term = shutil.get_terminal_size(fallback=(80, 24))
+        print(render_isohex_centered(
+            tiles, units, client.map_width, client.map_height,
+            cx, cy, term.columns, term.lines,
+        ))
+        return
+
+    # No args and centre is set → centred render
+    if not args and _map_center is not None:
+        cx, cy = _map_center
+        term = shutil.get_terminal_size(fallback=(80, 24))
+        print(render_isohex_centered(
+            tiles, units, client.map_width, client.map_height,
+            cx, cy, term.columns, term.lines,
+        ))
+        return
+
+    # Two plain integers (no ':') = pan delta from current centre
+    if (len(args) == 2
+            and ":" not in args[0] and ":" not in args[1]
+            and args[0] not in ("center", "legend")):
+        try:
+            dx, dy = int(args[0]), int(args[1])
+        except ValueError:
+            pass
+        else:
+            if _map_center is None:
+                print("No centre set. Use 'map center <x> <y>' first.")
+                return
+            cx, cy = _map_center
+            _map_center = (
+                (cx + dx) % client.map_width,
+                (cy + dy) % client.map_height,
+            )
+            cx, cy = _map_center
+            term = shutil.get_terminal_size(fallback=(80, 24))
+            print(render_isohex_centered(
+                tiles, units, client.map_width, client.map_height,
+                cx, cy, term.columns, term.lines,
+            ))
+            return
+
+    # Slice render
+    x_range: tuple[int, int] | None = None
+    y_range: tuple[int, int] | None = None
+
+    if len(args) >= 1:
+        try:
+            x_range = parse_map_range(args[0])
+        except ValueError as e:
+            print(f"Bad x range: {e}")
+            print("Usage: map [x1:x2 y1:y2]  |  map <dx> <dy>  |  map center <x> <y>")
+            return
+    if len(args) >= 2:
+        try:
+            y_range = parse_map_range(args[1])
+        except ValueError as e:
+            print(f"Bad y range: {e}")
+            print("Usage: map [x1:x2 y1:y2]  |  map <dx> <dy>  |  map center <x> <y>")
+            return
+
+    print(render_isohex(
+        tiles, units, client.map_width, client.map_height,
+        x_range, y_range,
+    ))
+
+
+def cmd_display(client: "FreecivClient") -> None:
+    """display — side-by-side: map | legend + units, auto-sized to terminal."""
+    topo = client.map_topology_id
+    if topo != 3:
+        print("display command only supports iso-hex topology (id=3).")
+        return
+
+    term = shutil.get_terminal_size(fallback=(160, 40))
+
+    # Build right panel: legend, cities, units
+    legend_lines = map_legend().splitlines()
+    cities_lines = cities_panel_lines(client.get_cities())
+    units_lines  = units_panel_lines(client.get_units())
+    right_lines  = legend_lines + [""] + cities_lines + [""] + units_lines
+    right_width  = max((visible_len(l) for l in right_lines), default=0)
+
+    # Map panel gets the remaining width
+    sep = " [90m|[0m "
+    sep_vis = 3  # " | "
+    map_cols = max(20, term.columns - right_width - sep_vis)
+    map_rows = max(4, term.lines - 1)
+
+    tiles = client.get_map()
+    units = client.get_units()
+
+    if _map_center is not None:
+        cx, cy = _map_center
+    else:
+        cx = client.map_width  // 2
+        cy = client.map_height // 2
+
+    map_str   = render_isohex_centered(
+        tiles, units, client.map_width, client.map_height,
+        cx, cy, map_cols, map_rows,
+    )
+    map_lines = map_str.splitlines()
+    map_vis_w = visible_len(map_lines[0]) if map_lines else map_cols
+
+    height = max(len(map_lines), len(right_lines))
+    rows: list[str] = []
+    for i in range(height):
+        ml = map_lines[i]   if i < len(map_lines)   else ""
+        rl = right_lines[i] if i < len(right_lines) else ""
+        rows.append(rpad(ml, map_vis_w) + sep + rl)
+    print("\n".join(rows))
 
 
 def cmd_help() -> None:
@@ -232,6 +446,12 @@ def cmd_help() -> None:
         "\n"
         "  Other:\n"
         "    poll                   — process server packets\n"
+        "    topology               — show map topology and dimensions\n"
+        "    display                — map + legend + units side by side (auto-sized)\n"
+        "    map [x1:x2 y1:y2]     — render iso-hex map (slice in native coords)\n"
+        "    map <dx> <dy>          — pan view by delta (e.g. map 2 -3)\n"
+        "    map center <x> <y>    — set view centre and render\n"
+        "    map legend             — show map colour/symbol legend\n"
         "    server <cmd>           — send a server command (requires hack level)\n"
         "    hack                   — check hack access level\n"
         "    h / help               — show this message\n"
@@ -525,6 +745,12 @@ async def run_cli(client: FreecivClient, stop_event: asyncio.Event) -> None:
         elif cmd == "poll":
             alive = await client.poll(timeout=0.5)
             print(f"State: {client.state.name}, connected: {alive}")
+        elif cmd == "topology":
+            cmd_topology(client)
+        elif cmd == "display":
+            cmd_display(client)
+        elif cmd == "map":
+            cmd_map(client, tokens[1:])
         elif cmd == "server":
             if len(tokens) < 2:
                 print("Usage: server <server command>")
@@ -642,6 +868,9 @@ async def main() -> None:
                     sys.exit(1)
                 await asyncio.sleep(0.05)
             print("Game started!\n")
+
+            # Auto-set map centre to geometric average of player's units
+            _init_map_center(client)
 
             await run_cli(client, stop_event)
     finally:
