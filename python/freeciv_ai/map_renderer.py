@@ -25,42 +25,74 @@ char_row = nat_y * 2
 
 import re
 
+# ---------------------------------------------------------------------------
+# 24-bit RGB colour helpers
+# ---------------------------------------------------------------------------
 
-def _map_bg(code: int) -> str:
-    return f"\033[48;5;{code}m"
+Color = tuple[int, int, int]  # (R, G, B) each 0-255
 
+def _bg(c: Color) -> str:
+    return f"\033[48;2;{c[0]};{c[1]};{c[2]}m"
 
-def _map_fg(code: int) -> str:
-    return f"\033[38;5;{code}m"
-
+def _fg(c: Color) -> str:
+    return f"\033[38;2;{c[0]};{c[1]};{c[2]}m"
 
 MAP_RESET = "\033[0m"
 
-_TERRAIN_BG: dict[str, int] = {
-    "ocean":      21,
-    "lake":       27,
-    "coast":      33,
-    "grassland":  34,
-    "plains":    100,
-    "desert":    220,
-    "mountains": 240,
-    "hills":     130,
-    "forest":     22,
-    "jungle":     28,
-    "tundra":    153,
-    "arctic":    231,
-    "swamp":      23,
+# Keep old names as aliases so repl.py import works unchanged
+def _map_bg(c: Color) -> str: return _bg(c)
+def _map_fg(c: Color) -> str: return _fg(c)
+
+# ---------------------------------------------------------------------------
+# Terrain palette (visible, full brightness)
+# ---------------------------------------------------------------------------
+
+_TERRAIN_BG: dict[str, Color] = {
+    "ocean":       (  0,  80, 180),
+    "deep ocean":  (  0,  50, 130),
+    "lake":        ( 30, 120, 200),
+    "coast":       ( 70, 160, 220),   # kept as alias
+    "grassland":   ( 55, 160,  45),
+    "plains":      (185, 175,  70),
+    "desert":      (215, 195,  75),
+    "mountains":   (120, 110, 100),
+    "hills":       (145, 100,  55),
+    "forest":      ( 25, 105,  35),
+    "jungle":      ( 15, 135,  50),
+    "tundra":      (140, 165, 195),
+    "arctic":      (210, 230, 255),
+    "glacier":     (210, 230, 255),   # same as arctic
+    "swamp":       ( 50,  95,  65),
+    "inaccessible":(  5,   5,   5),
 }
-BG_UNKNOWN = 232   # near-black — tile never seen
-BG_FOGGED  = 238   # dark grey  — seen before but currently fogged
-BG_DEFAULT = 241   # fallback for visible tiles with unknown terrain name
-FG_CONTENT = 15    # bright white
-FG_BORDER  = 237   # dark grey border characters
+
+# Sentinel / fallbacks
+BG_UNKNOWN: Color = ( 12,  12,  12)   # near-black — tile never seen
+BG_FOGGED:  Color = ( 32,  30,  28)   # slightly lighter dark — seen but not currently visible
+BG_DEFAULT: Color = ( 90,  90,  90)   # fallback for unknown terrain name
+FG_CONTENT: Color = (255, 255, 255)   # bright white text
+FG_BORDER: Color = ( 50,  45,  35)   # very dark — subtle on terrain
+FG_BORDER_VISIBLE = FG_BORDER  # alias kept for call sites
 
 
-def terrain_bg(terrain: str) -> int:
+
+_TERRAIN_INITIAL: dict[str, str] = {
+    "deep ocean": "~",
+    "inaccessible": "X",
+}
+
+def terrain_bg(terrain: str) -> Color:
     return _TERRAIN_BG.get(terrain.lower(), BG_DEFAULT)
 
+def _terrain_initial(terrain: str) -> str:
+    return _TERRAIN_INITIAL.get(terrain.lower(), terrain[0].upper() if terrain else "?")
+
+
+# ---------------------------------------------------------------------------
+# Canvas
+# ---------------------------------------------------------------------------
+
+_NO_COLOR: Color = (-1, -1, -1)  # sentinel: inherit / no explicit color
 
 class MapCanvas:
     """Fixed-size character + colour canvas for map rendering."""
@@ -68,12 +100,12 @@ class MapCanvas:
     def __init__(self, cols: int, rows: int) -> None:
         self.cols = cols
         self.rows = rows
-        self._ch: list[list[str]] = [[" "] * cols for _ in range(rows)]
-        self._fg: list[list[int]] = [[-1] * cols for _ in range(rows)]
-        self._bg: list[list[int]] = [[-1] * cols for _ in range(rows)]
+        self._ch: list[list[str]]   = [[" "] * cols for _ in range(rows)]
+        self._fg: list[list[Color]] = [[ _NO_COLOR] * cols for _ in range(rows)]
+        self._bg: list[list[Color]] = [[ _NO_COLOR] * cols for _ in range(rows)]
 
     def put(self, col: int, row: int, ch: str,
-            fg: int = FG_CONTENT, bg: int = -1) -> None:
+            fg: Color = FG_CONTENT, bg: Color = _NO_COLOR) -> None:
         if 0 <= col < self.cols and 0 <= row < self.rows:
             self._ch[row][col] = ch
             self._fg[row][col] = fg
@@ -83,22 +115,26 @@ class MapCanvas:
         lines: list[str] = []
         for row in range(self.rows):
             parts: list[str] = []
-            cur_fg = cur_bg = -1
+            cur_fg = cur_bg = _NO_COLOR
             for col in range(self.cols):
                 ch = self._ch[row][col]
                 fg = self._fg[row][col]
                 bg = self._bg[row][col]
                 esc = ""
                 if fg != cur_fg:
-                    esc += _map_fg(fg) if fg >= 0 else "\033[39m"
+                    esc += _fg(fg) if fg != _NO_COLOR else "\033[39m"
                     cur_fg = fg
                 if bg != cur_bg:
-                    esc += _map_bg(bg) if bg >= 0 else "\033[49m"
+                    esc += _bg(bg) if bg != _NO_COLOR else "\033[49m"
                     cur_bg = bg
                 parts.append(esc + ch)
             lines.append("".join(parts) + MAP_RESET)
         return "\n".join(lines)
 
+
+# ---------------------------------------------------------------------------
+# Coordinate conversion
+# ---------------------------------------------------------------------------
 
 def map_pos_to_native(mx: int, my: int, map_width: int) -> tuple[int, int]:
     """Convert Freeciv iso MAP coordinates to NATIVE (display) coordinates."""
@@ -107,10 +143,14 @@ def map_pos_to_native(mx: int, my: int, map_width: int) -> tuple[int, int]:
     return nat_x, nat_y
 
 
+# ---------------------------------------------------------------------------
+# Cell drawing helpers
+# ---------------------------------------------------------------------------
+
 def _tile_marker(tile: dict, own_units_map: dict[tuple[int, int], list[str]]) -> tuple[str, str]:
     """Return (terrain_initial, unit_marker) for a visible tile."""
     terrain = tile.get("terrain") or ""
-    x_ch = terrain[0].upper() if terrain else "?"
+    x_ch = _terrain_initial(terrain)
     city_id = tile.get("city_id", -1)
     n_units = tile.get("n_units", 0)
     map_key = (tile["x"], tile["y"])
@@ -131,18 +171,38 @@ def _tile_marker(tile: dict, own_units_map: dict[tuple[int, int], list[str]]) ->
     return x_ch, y_ch
 
 
-def _draw_cell(canvas: MapCanvas, cc: int, cr: int, bg: int,
-               x_ch: str, y_ch: str) -> None:
-    canvas.put(cc + 0, cr, "/",  fg=FG_BORDER,  bg=bg)
+def _draw_cell(canvas: MapCanvas, cc: int, cr: int, bg: Color,
+               x_ch: str, y_ch: str, border: Color = FG_BORDER) -> None:
+    canvas.put(cc + 0, cr, "/",  fg=border,     bg=bg)
     canvas.put(cc + 1, cr, x_ch, fg=FG_CONTENT, bg=bg)
     canvas.put(cc + 2, cr, " ",  fg=FG_CONTENT, bg=bg)
-    canvas.put(cc + 3, cr, "\\", fg=FG_BORDER,  bg=bg)
+    canvas.put(cc + 3, cr, "\\", fg=border,     bg=bg)
     u_ch = y_ch if y_ch != " " else "_"
-    canvas.put(cc + 0, cr + 1, "\\", fg=FG_BORDER,  bg=bg)
-    canvas.put(cc + 1, cr + 1, "_",  fg=FG_BORDER,  bg=bg)
-    canvas.put(cc + 2, cr + 1, u_ch, fg=FG_CONTENT if y_ch != " " else FG_BORDER, bg=bg)
-    canvas.put(cc + 3, cr + 1, "/",  fg=FG_BORDER,  bg=bg)
+    canvas.put(cc + 0, cr + 1, "\\", fg=border,     bg=bg)
+    canvas.put(cc + 1, cr + 1, "_",  fg=border,     bg=bg)
+    canvas.put(cc + 2, cr + 1, u_ch, fg=FG_CONTENT if y_ch != " " else border, bg=bg)
+    canvas.put(cc + 3, cr + 1, "/",  fg=border,     bg=bg)
 
+
+def _cell_colors(tile: dict | None, own_units_map: dict) -> tuple[Color, str, str, Color]:
+    """Return (bg_color, terrain_ch, unit_ch, border_color) for a tile."""
+    if tile is None:
+        return BG_UNKNOWN, " ", " ", FG_BORDER
+    known = tile["known"]
+    if known == 0:
+        return BG_UNKNOWN, " ", " ", FG_BORDER
+    bg = terrain_bg(tile.get("terrain") or "")
+    if known == 2:
+        x_ch, y_ch = _tile_marker(tile, own_units_map)
+        return bg, x_ch, y_ch, FG_BORDER_VISIBLE
+    else:
+        # fogged: terrain color but no text
+        return bg, " ", " ", FG_BORDER
+
+
+# ---------------------------------------------------------------------------
+# Public renderers
+# ---------------------------------------------------------------------------
 
 def render_isohex(
     tiles: list[dict],
@@ -189,13 +249,8 @@ def render_isohex(
         stagger = (nat_y % 2) * 2
         cc = (nat_x - nx_min) * 4 + stagger
         cr = (nat_y - ny_min) * 2
-        known = tile["known"]
-        if known == 0:
-            _draw_cell(canvas, cc, cr, BG_UNKNOWN, " ", " ")
-        else:
-            bg = terrain_bg(tile.get("terrain") or "") if known == 2 else BG_FOGGED
-            x_ch, y_ch = _tile_marker(tile, own_units_map)
-            _draw_cell(canvas, cc, cr, bg, x_ch, y_ch)
+        bg, x_ch, y_ch, border = _cell_colors(tile, own_units_map)
+        _draw_cell(canvas, cc, cr, bg, x_ch, y_ch, border)
 
     return canvas.render()
 
@@ -244,21 +299,15 @@ def render_isohex_centered(
         stagger = (ny % 2) * 2
         cc = vx * 4 + stagger
         cr = vy * 2
-        if tile is None:
-            _draw_cell(canvas, cc, cr, BG_UNKNOWN, " ", " ")
-        else:
-            known = tile["known"]
-            if known == 0:
-                _draw_cell(canvas, cc, cr, BG_UNKNOWN, " ", " ")
-            else:
-                bg = terrain_bg(tile.get("terrain") or "") if known == 2 else BG_FOGGED
-                x_ch, y_ch = _tile_marker(tile, own_units_map)
-                _draw_cell(canvas, cc, cr, bg, x_ch, y_ch)
+        bg, x_ch, y_ch, border = _cell_colors(tile, own_units_map)
+        _draw_cell(canvas, cc, cr, bg, x_ch, y_ch, border)
 
     return canvas.render()
 
 
-# ── ANSI + DISPLAY PANEL HELPERS ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# ANSI + display panel helpers
+# ---------------------------------------------------------------------------
 
 _ANSI_RE = re.compile(r"\033\[[^m]*m")
 
@@ -308,14 +357,17 @@ def map_legend() -> str:
     lines.append("  \\_U/    U = unit/city marker (bottom-right)\n")
 
     lines.append("Terrain colours & initials:")
-    for name, code in sorted(_TERRAIN_BG.items()):
-        initial = name[0].upper()
-        swatch = f"{_map_bg(code)}{_map_fg(FG_CONTENT)} {initial} {R}"
+    for name, color in sorted(_TERRAIN_BG.items()):
+        if name in ("coast",):  # alias, skip duplicate
+            continue
+        initial = _terrain_initial(name)
+        swatch = f"{_bg(color)}{_fg(FG_CONTENT)} {initial} {R}"
         lines.append(f"  {swatch}  {name.capitalize()}")
-    fogged  = f"{_map_bg(BG_FOGGED)}{_map_fg(FG_CONTENT)} ? {R}"
-    unknown = f"{_map_bg(BG_UNKNOWN)}{_map_fg(FG_CONTENT)}   {R}"
-    lines.append(f"  {fogged}  Fogged (seen, not visible now)")
-    lines.append(f"  {unknown}  Unexplored\n")
+
+    unknown = f"{_bg(BG_UNKNOWN)}{_fg(FG_CONTENT)}   {R}"
+    fogged_ex = f"{_bg(_TERRAIN_BG['grassland'])}{_fg(FG_CONTENT)}   {R}"
+    lines.append(f"  {unknown}  Unexplored (never seen)")
+    lines.append(f"  {fogged_ex}  Fogged (seen, not visible — terrain colour shown, no letter)\n")
 
     lines.append("Unit/city markers (bottom-right of cell):")
     lines.append("  C        City present")
