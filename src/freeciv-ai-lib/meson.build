@@ -1,4 +1,4 @@
-# Dependencies (same as client-ai, minus readline and threads)
+# Dependencies
 audio_dep = dependency('SDL2_mixer', required: false)
 net_dep = dependency('libcurl', required: false)
 gettext_dep = dependency('gettext', required: false)
@@ -7,21 +7,21 @@ lua_dep = dependency(
 m_dep = meson.get_compiler('c').find_library('m', required: false)
 cairo_dep = dependency('cairo', required: false)
 
-shared_library('freeciv_ai',
+freeciv_ai_lib = shared_library('freeciv_ai',
 
   freeciv_build,
 
-  # Library entry point + public API (replaces gui_main.c from client-ai)
+  # Library entry point + public API
   'freeciv_ai.c',
 
-  # GUI stubs reused from client-ai
-  '../client-ai/canvas.c',
-  '../client-ai/dialogs.c',
-  '../client-ai/diplodlg.c',
-  '../client-ai/gui_callbacks.c',
-  '../client-ai/optiondlg.c',
-  '../client-ai/repodlgs.c',
-  '../client-ai/sprite.c',
+  # GUI stubs
+  'canvas.c',
+  'dialogs.c',
+  'diplodlg.c',
+  'gui_callbacks.c',
+  'optiondlg.c',
+  'repodlgs.c',
+  'sprite.c',
 
   # freeciv GUI callback infrastructure
   '../../freeciv/client/gui_cbsetter.c',
@@ -29,6 +29,9 @@ shared_library('freeciv_ai',
 
   # Our chatline stub: forwards received messages to the C log
   'chatline.c',
+
+  # Linker --wrap overrides for headless mode
+  'mapview_overrides.c',
 
   # GUI stub implementations from freeciv/client/gui-stub
   '../../freeciv/client/gui-stub/citydlg.c',
@@ -84,6 +87,7 @@ shared_library('freeciv_ai',
     '-lfreeciv',
     '-Wl,--wrap=client_exit',
     '-Wl,--wrap=exit',
+    '-Wl,--wrap=move_unit_map_canvas',
   ],
 
   dependencies: [audio_dep, net_dep, gettext_dep, lua_dep, m_dep, cairo_dep],
