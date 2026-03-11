@@ -6,7 +6,7 @@ import asyncio
 import os
 import tempfile
 
-from ._logging import forward_subprocess, _configure_logger, _handler
+from ._logging import forward_subprocess
 
 
 class FreecivServer:

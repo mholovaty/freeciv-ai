@@ -19,6 +19,7 @@ import os
 import sys
 import re
 import logging
+import readline
 
 # Pattern: "3: some message"  (freeciv log level prefix)
 _FC_LINE = re.compile(r"^(\d+): (.*)$")
@@ -39,6 +40,21 @@ _handler: "logging.Handler | None" = None
 
 # Current prompt — set by the REPL before/after each input wait.
 _current_prompt: str = ""
+
+# Optional TUI callback — when set, log messages are routed here instead of stdout.
+_tui_log_callback = None  # type: ignore[assignment]
+
+
+def set_tui_log_callback(fn) -> None:  # type: ignore[type-arg]
+    """Route all log output to *fn(msg: str)* instead of stdout."""
+    global _tui_log_callback
+    _tui_log_callback = fn
+
+
+def clear_tui_log_callback() -> None:
+    """Restore normal stdout log output."""
+    global _tui_log_callback
+    _tui_log_callback = None
 
 
 def set_prompt(prompt: str) -> None:
@@ -78,10 +94,13 @@ class _PromptAwareHandler(logging.StreamHandler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
+            if _tui_log_callback is not None:
+                _tui_log_callback(msg)
+                return
             stream = self.stream
             stream.write(f"\r\033[2K{msg}\n")
             if _current_prompt:
-                stream.write(_current_prompt)
+                stream.write(_current_prompt + readline.get_line_buffer())
             stream.flush()
         except Exception:
             self.handleError(record)
@@ -139,6 +158,18 @@ def setup_logging(level: int = logging.INFO) -> None:
     _handler = _make_handler(level)
     for name in ("freeciv_ai.server", "freeciv_ai.lib"):
         _configure_logger(name, level, _handler)
+
+    # Also configure a plain handler on the root logger so that other
+    # modules (e.g. freeciv_ai.torch.train) produce visible output.
+    root = logging.getLogger()
+    if not root.handlers:
+        plain_handler = _PromptAwareHandler(stream=sys.stdout)
+        plain_handler.setFormatter(
+            logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+        )
+        plain_handler.setLevel(level)
+        root.setLevel(level)
+        root.addHandler(plain_handler)
 
 
 def _ensure_so_capture() -> None:

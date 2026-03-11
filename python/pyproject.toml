@@ -6,13 +6,15 @@ name = "freeciv-ai"
 version = "0.1.0"
 description = "Python AI client for Freeciv, interfacing with libfreeciv_ai.so via CFFI"
 requires-python = ">=3.11"
-dependencies = ["cffi>=1.0"]
+dependencies = ["cffi>=1.0", "prompt_toolkit>=3.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=9", "pytest-asyncio>=1.3"]
+train = ["torch>=2.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "module"
 
 [tool.setuptools.packages.find]
 where = ["."]

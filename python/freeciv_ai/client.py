@@ -5,6 +5,7 @@ High-level Python wrapper around the freeciv_ai CFFI bindings.
 
 import asyncio
 import logging
+import select as _select
 from enum import IntEnum
 
 from ._lib import ffi, load_lib, find_data_path
@@ -16,10 +17,11 @@ _logger = logging.getLogger(__name__)
 class ClientState(IntEnum):
     """Mirrors freeciv's enum client_states."""
 
-    INITIAL = 0  # C_S_INITIAL      — client boot / just started
+    INITIAL = 0       # C_S_INITIAL      — client boot / just started
     DISCONNECTED = 1  # C_S_DISCONNECTED — not connected (also used for errors)
-    PREPARING = 2  # C_S_PREPARING    — connected, in pre-game lobby
-    RUNNING = 3  # C_S_RUNNING      — game in progress
+    PREPARING = 2     # C_S_PREPARING    — connected, in pre-game lobby
+    RUNNING = 3       # C_S_RUNNING      — game in progress
+    OVER = 4          # C_S_OVER         — game over, score screen
 
 
 class FreecivClient:
@@ -66,6 +68,30 @@ class FreecivClient:
             self._poll_task = None
         self._lib.freeciv_ai_stop()
 
+    async def reconnect(
+        self, host: str = "localhost", port: int = 5556, username: str = "ai-player"
+    ) -> None:
+        """
+        Disconnect from the current server and immediately reconnect to *host*:*port*.
+
+        Reuses the existing C coroutine — no ``client_main()`` re-run.
+        Safe to call between episodes to reset game state without restarting
+        the library.  Raises :exc:`ConnectionError` on failure.
+        """
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._poll_task = None
+        self._polling = False  # reset in case task was cancelled mid-poll
+        ret = self._lib.freeciv_ai_reconnect(host.encode(), port, username.encode())
+        if ret != 0:
+            raise ConnectionError(f"Failed to reconnect to {host}:{port}")
+        loop = asyncio.get_running_loop()
+        self._poll_task = loop.create_task(self._poll_loop(), name="freeciv-poll")
+
     def __enter__(self) -> "FreecivClient":
         return self
 
@@ -76,38 +102,36 @@ class FreecivClient:
         """
         Drive the network event loop for up to *timeout* seconds.
 
+        Uses select() instead of asyncio.add_reader to avoid epoll fd-reuse
+        bugs when the same fd number is allocated for a new socket after
+        reconnect.
         """
         fd = self._lib.freeciv_ai_get_socket()
         if fd < 0:
+            await asyncio.sleep(timeout)
             return self.state != ClientState.DISCONNECTED
 
-        # Only one poll() may be active at a time (single-threaded asyncio,
-        # but multiple tasks may call poll() concurrently).
         if self._polling:
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
             return self.state != ClientState.DISCONNECTED
 
         self._polling = True
-        loop = asyncio.get_running_loop()
-        ev = asyncio.Event()
-
-        def _readable() -> None:
-            loop.remove_reader(fd)
-            self._polling = False
-            ev.set()
-
-        loop.add_reader(fd, _readable)
         try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-            self._lib.freeciv_ai_input(fd)
-        except asyncio.TimeoutError:
-            loop.remove_reader(fd)
+            loop = asyncio.get_running_loop()
+            readable, _, _ = await loop.run_in_executor(
+                None, lambda: _select.select([fd], [], [], timeout)
+            )
+            if readable:
+                self._lib.freeciv_ai_input(fd)
+        except BaseException:
+            raise
+        finally:
             self._polling = False
 
         return self.state != ClientState.DISCONNECTED
 
     async def _poll_loop(self, interval: float = 0.1) -> None:
-        while self.state != ClientState.DISCONNECTED:
+        while True:
             await self.poll(timeout=interval)
 
     async def _stop_polling(self) -> None:
@@ -311,6 +335,16 @@ class FreecivClient:
         """
         return self._lib.freeciv_ai_can_do_action(unit_id, action_id, target_id)
 
+    def request_city_name_suggestion(self, unit_id: int) -> None:
+        """Ask the server for a nation-appropriate city name for *unit_id*.
+
+        The server replies with PACKET_CITY_NAME_SUGGESTION_INFO.  The stub
+        GUI handler (popup_newcity_dialog) receives the reply and immediately
+        founds the city with the suggested name.  Call poll() after this to
+        process the round-trip.
+        """
+        self._lib.freeciv_ai_request_city_name_suggestion(unit_id)
+
     def do_action(
         self,
         unit_id: int,
@@ -479,7 +513,6 @@ class FreecivClient:
                     if client.can_act:
                         client.end_turn()
         """
-        import logging
         from .server import FreecivServer
 
         server = await FreecivServer().start(

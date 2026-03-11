@@ -79,6 +79,7 @@ const bool gui_use_transliteration = FALSE;
 typedef enum {
   CORO_CONNECTED    = 1, /* gui_ui_main connected; Python drives the loop  */
   CORO_DISCONNECTED = 2, /* connection failed or client_exit() was called   */
+  CORO_RECONNECT    = 3, /* freeciv_ai_reconnect(): disconnect then reconnect */
 } coro_status_t;
 
 static ucontext_t     g_main_ctx;           /* Python / caller context      */
@@ -186,11 +187,13 @@ void gui_real_conn_list_dialog_update(void *unused) {}
 
 void gui_add_net_input(int sock)
 {
+  fprintf(stderr, "freeciv_ai: gui_add_net_input(%d)\n", sock);
   g_net_socket = sock;
 }
 
 void gui_remove_net_input(void)
 {
+  fprintf(stderr, "freeciv_ai: gui_remove_net_input() (was %d)\n", g_net_socket);
   g_net_socket = -1;
 }
 
@@ -229,15 +232,35 @@ int gui_ui_main(int argc, char *argv[])
 
   char errbuf[512];
 
-  if (connect_to_server(user_name, server_host, server_port,
-                        errbuf, sizeof(errbuf)) != -1) {
-    g_last_state = C_S_PREPARING;
-    coro_yield(CORO_CONNECTED);   /* Give control to Python. */
-    /* Resumed here by freeciv_ai_stop(). */
-    disconnect_from_server(false);
-  } else {
-    fprintf(stderr, "freeciv_ai: connection failed: %s\n", errbuf);
-    g_last_state = C_S_DISCONNECTED;
+  while (TRUE) {
+    if (connect_to_server(user_name, server_host, server_port,
+                          errbuf, sizeof(errbuf)) != -1) {
+      g_last_state = C_S_PREPARING;
+      coro_yield(CORO_CONNECTED);   /* Give control to Python. */
+      /* Resumed here by freeciv_ai_stop() or freeciv_ai_reconnect(). */
+
+      if (g_coro_status == CORO_RECONNECT) {
+        /* Caller wants a reconnect: disconnect cleanly, update params,
+         * then loop back to connect_to_server(). */
+        disconnect_from_server(false);
+        strncpy(server_host, g_argv_host, sizeof(server_host) - 1);
+        server_host[sizeof(server_host) - 1] = '\0';
+        server_port = atoi(g_argv_port);
+        strncpy(user_name, g_argv_user, sizeof(user_name) - 1);
+        user_name[sizeof(user_name) - 1] = '\0';
+        /* Give the server a moment to restart to lobby after we disconnect.
+         * Without this, connect_to_server() may race and be refused. */
+        usleep(1500000); /* 1.5 s */
+        continue;
+      }
+
+      /* Normal stop: disconnect and exit. */
+      disconnect_from_server(false);
+    } else {
+      fprintf(stderr, "freeciv_ai: connection failed: %s\n", errbuf);
+      g_last_state = C_S_DISCONNECTED;
+    }
+    break;
   }
 
   start_quitting();
@@ -343,17 +366,39 @@ int freeciv_ai_get_socket(void)
  */
 void freeciv_ai_input(int fd)
 {
+  static int call_count = 0;
+  call_count++;
+  if (call_count % 20 == 1) {
+    fprintf(stderr, "freeciv_ai: input call #%d fd=%d state=%d\n",
+            call_count, fd, (int)client_state());
+  }
+  enum client_states before = client_state();
   input_from_server(fd);
 
   enum client_states cs = client_state();
   if (cs != g_last_state) {
+    fprintf(stderr, "freeciv_ai: state %d -> %d\n", (int)before, (int)cs);
     g_last_state = cs;
   }
 }
 
 int freeciv_ai_send_chat(const char *message)
 {
-  return send_chat(message);
+  int ret = send_chat(message);
+  /* Flush the outgoing send buffer immediately so the server receives the
+   * command even when the socket is not triggered readable by incoming data
+   * (e.g. the first /start after reconnect). */
+  fprintf(stderr, "freeciv_ai: send_chat '%s' ret=%d used=%d ndata=%d sock=%d\n",
+          message, ret,
+          (int)client.conn.used,
+          client.conn.send_buffer ? client.conn.send_buffer->ndata : -1,
+          client.conn.sock);
+  if (client.conn.used) {
+    flush_connection_send_buffer_all(&client.conn);
+    fprintf(stderr, "freeciv_ai: after flush ndata=%d\n",
+            client.conn.send_buffer ? client.conn.send_buffer->ndata : -1);
+  }
+  return ret;
 }
 
 bool freeciv_ai_has_hack(void)
@@ -377,6 +422,38 @@ void freeciv_ai_stop(void)
 
   free(g_coro_stack);
   g_coro_stack = NULL;
+}
+
+/*
+ * Disconnect from the current server and reconnect to host:port as username.
+ * Reuses the existing coroutine — no client_main() re-run.
+ * Returns 0 on success, -1 on failure.
+ */
+int freeciv_ai_reconnect(const char *host, int port, const char *username)
+{
+  if (!g_coro_stack) {
+    return -1; /* No active connection to reconnect from. */
+  }
+
+  /* Update connection args so gui_ui_main() picks them up after disconnect. */
+  snprintf(g_argv_host, sizeof(g_argv_host), "%s", host);
+  snprintf(g_argv_port, sizeof(g_argv_port), "%d", port);
+  snprintf(g_argv_user, sizeof(g_argv_user), "%s", username);
+
+  /* Signal the coroutine to disconnect-and-reconnect. */
+  g_coro_status = CORO_RECONNECT;
+  g_in_coro = true;
+  swapcontext(&g_main_ctx, &g_coro_ctx);
+  /* Back here: coroutine either yielded CORO_CONNECTED or CORO_DISCONNECTED. */
+
+  if (g_coro_status == CORO_CONNECTED) {
+    return 0;
+  }
+
+  /* Reconnect failed; coroutine has exited. */
+  free(g_coro_stack);
+  g_coro_stack = NULL;
+  return -1;
 }
 
 bool freeciv_ai_can_act(void)
@@ -710,6 +787,11 @@ int freeciv_ai_can_do_action(int unit_id, int action_id, int target_id)
     return -1;
   }
   return prob.min;
+}
+
+void freeciv_ai_request_city_name_suggestion(int unit_id)
+{
+  dsend_packet_city_name_suggestion_req(&client.conn, unit_id);
 }
 
 void freeciv_ai_do_action(int unit_id, int action_id, int target_id,

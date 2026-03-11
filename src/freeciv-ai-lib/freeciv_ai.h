@@ -160,6 +160,14 @@ bool freeciv_ai_has_hack(void);
 /* Disconnect from the server and clean up. */
 void freeciv_ai_stop(void);
 
+/*
+ * Disconnect from the current server and immediately reconnect to
+ * host:port as username.  Reuses the existing coroutine without
+ * re-running client_main().  Returns 0 on success, -1 on failure.
+ * Must only be called while connected (after freeciv_ai_connect()).
+ */
+int freeciv_ai_reconnect(const char *host, int port, const char *username);
+
 /* ------------------------------------------------------------------ */
 /* Map                                                                  */
 /* ------------------------------------------------------------------ */
@@ -249,6 +257,14 @@ void freeciv_ai_cancel_action_decision(int actor_id);
  * certain), or -1 when the action is impossible / invalid.
  */
 int freeciv_ai_can_do_action(int unit_id, int action_id, int target_id);
+
+/*
+ * Request a city name suggestion from the server for unit_id (a settler).
+ * The server replies with PACKET_CITY_NAME_SUGGESTION_INFO; the stub GUI
+ * receives that reply and automatically founds the city with the suggested
+ * nation-appropriate name.  Poll after calling this to process the reply.
+ */
+void freeciv_ai_request_city_name_suggestion(int unit_id);
 
 /*
  * Ask the server to perform action_id with actor unit_id against target_id.
