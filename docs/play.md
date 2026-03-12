@@ -1,4 +1,4 @@
-# Tutorial 03 — Running a Trained Agent Against a Live Server
+# Tutorial — Running a Trained Agent Against a Live Server
 
 This tutorial covers `freeciv_ai/torch/play.py`: how to connect a trained checkpoint to a running Freeciv server and watch it play, including multi-agent setups where several AI instances compete against each other.
 

@@ -1,4 +1,4 @@
-# Tutorial 01 — Training an Exploration Agent with REINFORCE
+# Tutorial — Training an Exploration Agent with REINFORCE
 
 This tutorial explains every building block used in the Freeciv exploration training pipeline. It is intended as a self-contained reference for the code in `python/freeciv_ai/torch/`.
 
@@ -227,8 +227,8 @@ A well-training agent will show `return` increasing over episodes, meaning it is
 
 ## Next Steps
 
-- **Tutorial 02**: Scaling the action space — masking, hierarchical actions, and attention-based encodings (`02-action-space-scaling.md`).
-- **Tutorial 03**: Running a trained agent against a live server (`03-play.md`).
-- **Tutorial 04**: Action masking — eliminating blocked moves from the policy distribution (`04-action-masking.md`).
+- **Tutorial**: Scaling the action space — masking, hierarchical actions, and attention-based encodings (`action-space-scaling.md`).
+- **Tutorial**: Running a trained agent against a live server (`play.md`).
+- **Tutorial**: Action masking — eliminating blocked moves from the policy distribution (`action-masking.md`).
 - **Tutorial 05** (planned): Replace REINFORCE with PPO for better sample efficiency.
 - **Tutorial 06** (planned): Add a CNN over the map instead of a flat MLP for spatial reasoning.

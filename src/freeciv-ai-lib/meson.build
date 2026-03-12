@@ -29,6 +29,7 @@ freeciv_ai_lib = shared_library('freeciv_ai',
 
   # Our chatline stub: forwards received messages to the C log
   'chatline.c',
+  'mapctrl.c',
 
   # Linker --wrap overrides for headless mode
   'mapview_overrides.c',
@@ -45,7 +46,6 @@ freeciv_ai_lib = shared_library('freeciv_ai',
   '../../freeciv/client/gui-stub/infradlg.c',
   '../../freeciv/client/gui-stub/inteldlg.c',
   '../../freeciv/client/gui-stub/luaconsole.c',
-  '../../freeciv/client/gui-stub/mapctrl.c',
   '../../freeciv/client/gui-stub/mapview.c',
   '../../freeciv/client/gui-stub/menu.c',
   '../../freeciv/client/gui-stub/messagedlg.c',

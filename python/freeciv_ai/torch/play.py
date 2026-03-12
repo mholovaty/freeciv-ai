@@ -9,7 +9,7 @@ the server lifecycle.
 Pass ``--auto-start`` to have the script send /start itself (single-player /
 training convenience; requires hack level, i.e. localhost only).
 
-See docs/tutorials/03-play.md for a full walkthrough.
+See docs/play.md for a full walkthrough.
 """
 
 import argparse

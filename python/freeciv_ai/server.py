@@ -2,11 +2,42 @@
 FreecivServer — manages a local freeciv-server subprocess via asyncio.
 """
 
+import atexit
 import asyncio
+import ctypes
 import os
+import signal
+import sys
 import tempfile
+import weakref
 
 from ._logging import forward_subprocess
+
+_PR_SET_PDEATHSIG = 1
+_LIVE_SERVERS: "weakref.WeakSet[FreecivServer]" = weakref.WeakSet()
+
+
+def _set_parent_death_signal() -> None:
+    """Ask Linux to deliver SIGTERM to the child if the Python parent dies."""
+    if sys.platform != "linux":
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+
+    # If the parent already died between fork() and prctl(), terminate now.
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _cleanup_live_servers() -> None:
+    for server in list(_LIVE_SERVERS):
+        server.force_kill()
+
+
+atexit.register(_cleanup_live_servers)
 
 
 class FreecivServer:
@@ -113,7 +144,9 @@ class FreecivServer:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            preexec_fn=_set_parent_death_signal if sys.platform == "linux" else None,
         )
+        _LIVE_SERVERS.add(self)
 
         ready_event = asyncio.Event()
         ready_pattern = f"accepting new client connections on port {port}"
@@ -148,12 +181,13 @@ class FreecivServer:
                 self._proc.stdin.write(b"/quit\n")
                 await self._proc.stdin.drain()
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except Exception:
+            except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError, ProcessLookupError):
                 pass
         if self._proc.returncode is None:
             self._proc.kill()
             await self._proc.wait()
         self._proc = None
+        _LIVE_SERVERS.discard(self)
         self._cleanup_script()
 
     def force_kill(self) -> None:
@@ -167,6 +201,7 @@ class FreecivServer:
             self._proc.kill()
         self._cleanup_script()
         self._proc = None
+        _LIVE_SERVERS.discard(self)
 
     async def send(self, cmd: str) -> None:
         """Send a command to the server's stdin console."""

@@ -3,22 +3,10 @@
 Topology IDs (bitmask: TF_ISO=1, TF_HEX=2):
   0  flat square  — simple rectangular grid
   1  iso square   — isometric diamond view
-  2  flat hex     — row-staggered hex grid (N/NE/E/W/SW/S valid)
-  3  iso-hex      — isometric hex, beehive layout (N/NW/W/E/S/SE valid)
+  2  flat hex     — column-staggered hex grid (odd columns shifted down)
+  3  iso-hex      — isometric hex, aligned with Freeciv client projection
 
-GUI coordinate mapping (MAP → char canvas):
-
-  id=0  gc = mx * 4              gr = my * 2        step-4 square grid
-  id=1  gc = (mx-my) * 4        gr = (mx+my) * 2   iso diamond, step-4
-  id=2  gc = mx*4 + (my%2)*2    gr = my * 2        row-stagger hex, step-4
-  id=3  gc = (mx-my) * 3        gr = mx + my       iso beehive, step-3 (rows shared)
-
-For id=3 adjacent tiles differ by Δgc=±3, Δgr=±1 (E/S/N/W dirs) so their
-/\\ and \\/ edge characters land on the same canvas column — forming the
-beehive.  The NW/SE dirs differ by Δgc=0, Δgr=±2 (directly above/below,
-sharing the __ cap).
-
-Center coords passed to render_map_centered() are always MAP coords (mx, my).
+Center coords passed to render_map_centered() are GUI coords.
 """
 
 import re
@@ -29,51 +17,61 @@ import re
 
 Color = tuple[int, int, int]  # (R, G, B) each 0-255
 
+
 def _bg(c: Color) -> str:
     return f"\033[48;2;{c[0]};{c[1]};{c[2]}m"
+
 
 def _fg(c: Color) -> str:
     return f"\033[38;2;{c[0]};{c[1]};{c[2]}m"
 
+
 MAP_RESET = "\033[0m"
 
-def _map_bg(c: Color) -> str: return _bg(c)
-def _map_fg(c: Color) -> str: return _fg(c)
+
+def _map_bg(c: Color) -> str:
+    return _bg(c)
+
+
+def _map_fg(c: Color) -> str:
+    return _fg(c)
+
 
 # ---------------------------------------------------------------------------
 # Terrain palette
 # ---------------------------------------------------------------------------
 
 _TERRAIN_BG: dict[str, Color] = {
-    "ocean":       (  0,  80, 180),
-    "deep ocean":  (  0,  50, 130),
-    "lake":        ( 30, 120, 200),
-    "coast":       ( 70, 160, 220),
-    "grassland":   ( 55, 160,  45),
-    "plains":      (185, 175,  70),
-    "desert":      (215, 195,  75),
-    "mountains":   (120, 110, 100),
-    "hills":       (145, 100,  55),
-    "forest":      ( 25, 105,  35),
-    "jungle":      ( 15, 135,  50),
-    "tundra":      (140, 165, 195),
-    "arctic":      (210, 230, 255),
-    "glacier":     (210, 230, 255),
-    "swamp":       ( 50,  95,  65),
-    "inaccessible":(  5,   5,   5),
+    "ocean": (0, 80, 180),
+    "deep ocean": (0, 50, 130),
+    "lake": (30, 120, 200),
+    "coast": (70, 160, 220),
+    "grassland": (55, 160, 45),
+    "plains": (185, 175, 70),
+    "desert": (215, 195, 75),
+    "mountains": (120, 110, 100),
+    "hills": (145, 100, 55),
+    "forest": (25, 105, 35),
+    "jungle": (15, 135, 50),
+    "tundra": (140, 165, 195),
+    "arctic": (210, 230, 255),
+    "glacier": (210, 230, 255),
+    "swamp": (50, 95, 65),
+    "inaccessible": (5, 5, 5),
 }
 
-BG_UNKNOWN: Color = ( 12,  12,  12)
-BG_FOGGED:  Color = ( 32,  30,  28)
-BG_DEFAULT: Color = ( 90,  90,  90)
+BG_UNKNOWN: Color = (12, 12, 12)
+BG_FOGGED: Color = (32, 30, 28)
+BG_DEFAULT: Color = (90, 90, 90)
 FG_CONTENT: Color = (255, 255, 255)
-FG_BORDER:  Color = ( 50,  45,  35)
+FG_BORDER: Color = (50, 45, 35)
 FG_BORDER_VISIBLE = FG_BORDER
 
 # Foreground colors for notable tile objects
-FG_CITY:     Color = (255, 220,  50)   # gold
-FG_OWN_UNIT: Color = (120, 230, 255)   # light cyan
-FG_ENEMY:    Color = (255, 110,  80)   # orange-red
+FG_CITY: Color = (255, 220, 50)  # gold
+FG_OWN_UNIT: Color = (120, 230, 255)  # light cyan
+FG_ENEMY: Color = (255, 110, 80)  # orange-red
+
 
 def terrain_bg(terrain: str) -> Color:
     return _TERRAIN_BG.get(terrain.lower(), BG_DEFAULT)
@@ -85,18 +83,20 @@ def terrain_bg(terrain: str) -> Color:
 
 _NO_COLOR: Color = (-1, -1, -1)
 
+
 class MapCanvas:
     """Fixed-size character + colour canvas."""
 
     def __init__(self, cols: int, rows: int) -> None:
         self.cols = cols
         self.rows = rows
-        self._ch: list[list[str]]   = [[" "] * cols for _ in range(rows)]
-        self._fg: list[list[Color]] = [[_NO_COLOR]  * cols for _ in range(rows)]
-        self._bg: list[list[Color]] = [[_NO_COLOR]  * cols for _ in range(rows)]
+        self._ch: list[list[str]] = [[" "] * cols for _ in range(rows)]
+        self._fg: list[list[Color]] = [[_NO_COLOR] * cols for _ in range(rows)]
+        self._bg: list[list[Color]] = [[_NO_COLOR] * cols for _ in range(rows)]
 
-    def put(self, col: int, row: int, ch: str,
-            fg: Color = FG_CONTENT, bg: Color = _NO_COLOR) -> None:
+    def put(
+        self, col: int, row: int, ch: str, fg: Color = FG_CONTENT, bg: Color = _NO_COLOR
+    ) -> None:
         if 0 <= col < self.cols and 0 <= row < self.rows:
             self._ch[row][col] = ch
             self._fg[row][col] = fg
@@ -127,22 +127,49 @@ class MapCanvas:
 # Coordinate helpers
 # ---------------------------------------------------------------------------
 
+
 def _gui_pos(mx: int, my: int, topo: int) -> tuple[int, int]:
     """Return (gui_col, gui_row) for MAP tile (mx, my) under topology topo."""
-    if topo == 3:   return (mx - my) * 3, mx + my          # iso-hex beehive
-    if topo == 1:   return (mx - my) * 4, (mx + my) * 2    # iso-square diamond
-    if topo == 2:   return mx * 4 + (my % 2) * 2, my * 2   # flat-hex row-stagger
-    return mx * 4, my * 2                                   # flat-square
+    if topo == 0:  # flat-square
+        return mx * 7, my * 3
+    if topo == 1:  # iso-square
+        return (mx - my) * 7, (mx + my) * 3
+    if topo == 2:  # flat-hex: odd columns shifted down by 2
+        return mx * 6, my * 4 + (mx % 2) * 2
+    if topo == 3:  # iso-hex: Freeciv map_to_gui_vector() with 6x2 steps
+        return (mx - my) * 6, (mx + my) * 2
+    else:
+        raise AssertionError()
 
-def _gc_x_period(topo: int, map_width: int) -> int:
-    """gc shift when mx increases by map_width (x-wrap period)."""
-    if topo in (1, 3): return (4 if topo == 1 else 3) * map_width
-    return 4 * map_width
 
-def _gr_y_period(topo: int, map_height: int) -> int:
-    """gr shift when my increases by map_height (y-wrap period)."""
-    if topo == 3: return map_height          # gr = mx+my, only my contributes
-    return 2 * map_height                    # gr = my*2 (or (mx+my)*2)
+def _gui_col_wrap_period(topo: int, map_width: int) -> int:
+    """GUI-column delta for one full x-wrap.
+
+    For isometric maps, Freeciv wraps in native coordinates. In map coordinates
+    the x-wrap vector is (map_width, -map_width), which is a pure horizontal
+    shift in GUI space.
+    """
+    if topo == 3:
+        return 12 * map_width  # (mx, my) -> (mx+W, my-W)
+    if topo == 2:
+        return 6 * map_width  # gui_col = mx*6, step 6
+    if topo == 1:
+        return 14 * map_width  # (mx, my) -> (mx+W, my-W)
+    return 7 * map_width  # gui_col = mx*7, step 7
+
+
+def _gui_row_wrap_period(topo: int, map_height: int) -> int:
+    """GUI-row delta for one full y-wrap.
+
+    For isometric maps, the y-wrap vector in map coordinates is
+    (map_height / 2, map_height / 2), which is a pure vertical GUI shift.
+    """
+    if topo == 3:
+        return 2 * map_height  # (mx, my) -> (mx+H/2, my+H/2)
+    if topo == 2:
+        return 4 * map_height  # gui_row = my*4 + (mx%2)*2, my contributes step 4
+    return 3 * map_height  # topo 0: (mx, my+H), topo 1: (mx+H/2, my+H/2)
+
 
 # Keep for backward compat (repl.py imports this)
 def map_pos_to_native(mx: int, my: int, map_width: int) -> tuple[int, int]:
@@ -154,6 +181,7 @@ def map_pos_to_native(mx: int, my: int, map_width: int) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 # Cell drawing
 # ---------------------------------------------------------------------------
+
 
 def _tile_unit_slots(
     own_types: list[str], n_foreign: int, n_slots: int = 3
@@ -228,54 +256,199 @@ def _cell_colors(
 
 
 def _draw_hex_cell(
-    canvas: MapCanvas, cc: int, cr: int, bg: Color,
-    tl_ch: str, tl_fg: Color,
-    tr_ch: str, tr_fg: Color,
-    bl_ch: str, bl_fg: Color,
-    br_ch: str, br_fg: Color,
+    canvas: MapCanvas,
+    canvas_col: int,
+    canvas_row: int,
+    bg: Color,
+    tl_ch: str,
+    tl_fg: Color,
+    tr_ch: str,
+    tr_fg: Color,
+    bl_ch: str,
+    bl_fg: Color,
+    br_ch: str,
+    br_fg: Color,
     border: Color = FG_BORDER,
 ) -> None:
-    """Draw a hex cell — 4 chars wide, 2 rows tall.
+    """Draw a hex cell — 8 chars wide, 4 rows tall, step 6.
 
-      / TL TR \\
-      \\ BL BR /
+    canvas_col+0 and canvas_col+7 are shared border cols with the left/right neighbours
+    (next cell overwrites them), so the effective advance per column is 6.
+
+        /   \
+       / 1 2 \
+       \ 3 4 /
+        \   /
+
     """
-    canvas.put(cc,     cr,   "/",   fg=border, bg=bg)
-    canvas.put(cc + 1, cr,   tl_ch, fg=tl_fg,  bg=bg)
-    canvas.put(cc + 2, cr,   tr_ch, fg=tr_fg,  bg=bg)
-    canvas.put(cc + 3, cr,   "\\",  fg=border, bg=bg)
-    canvas.put(cc,     cr+1, "\\",  fg=border, bg=bg)
-    canvas.put(cc + 1, cr+1, bl_ch, fg=bl_fg,  bg=bg)
-    canvas.put(cc + 2, cr+1, br_ch, fg=br_fg,  bg=bg)
-    canvas.put(cc + 3, cr+1, "/",   fg=border, bg=bg)
+    N = _NO_COLOR
+    # row 0: top indent (/ and \ sit one column inward)
+    # canvas.put(canvas_col, canvas_row, " ", fg=FG_CONTENT, bg=N)
+    canvas.put(canvas_col + 1, canvas_row, "/", fg=border, bg=N)
+    canvas.put(canvas_col + 2, canvas_row, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 3, canvas_row, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 4, canvas_row, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 5, canvas_row, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 6, canvas_row, "\\", fg=border, bg=N)
+    # canvas.put(canvas_col + 7, canvas_row, " ", fg=FG_CONTENT, bg=N)
+    # row 1: top content row (/ and \ flush at edges)
+    canvas.put(canvas_col, canvas_row + 1, "/", fg=border, bg=N)
+    canvas.put(canvas_col + 1, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 2, canvas_row + 1, tl_ch, fg=tl_fg, bg=bg)
+    canvas.put(canvas_col + 3, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 4, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 5, canvas_row + 1, tr_ch, fg=tr_fg, bg=bg)
+    canvas.put(canvas_col + 6, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 7, canvas_row + 1, "\\", fg=border, bg=N)
+    # row 2: bottom content row (\ and / flush at edges)
+    canvas.put(canvas_col, canvas_row + 2, "\\", fg=border, bg=N)
+    canvas.put(canvas_col + 1, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 2, canvas_row + 2, bl_ch, fg=bl_fg, bg=bg)
+    canvas.put(canvas_col + 3, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 4, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 5, canvas_row + 2, br_ch, fg=br_fg, bg=bg)
+    canvas.put(canvas_col + 6, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 7, canvas_row + 2, "/", fg=border, bg=N)
+    # row 3: bottom indent (\ and / sit one column inward)
+    # canvas.put(canvas_col, canvas_row + 3, " ", fg=FG_CONTENT, bg=N)
+    canvas.put(canvas_col + 1, canvas_row + 3, "\\", fg=border, bg=N)
+    canvas.put(canvas_col + 2, canvas_row + 3, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 3, canvas_row + 3, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 4, canvas_row + 3, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 5, canvas_row + 3, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 6, canvas_row + 3, "/", fg=border, bg=N)
+    # canvas.put(canvas_col + 7, canvas_row + 3, " ", fg=FG_CONTENT, bg=N)
 
 
 def _draw_square_cell(
-    canvas: MapCanvas, cc: int, cr: int, bg: Color,
-    tl_ch: str, tl_fg: Color,
-    tr_ch: str, tr_fg: Color,
-    bl_ch: str, bl_fg: Color,
-    br_ch: str, br_fg: Color,
+    canvas: MapCanvas,
+    canvas_col: int,
+    canvas_row: int,
+    bg: Color,
+    tl_ch: str,
+    tl_fg: Color,
+    tr_ch: str,
+    tr_fg: Color,
+    bl_ch: str,
+    bl_fg: Color,
+    br_ch: str,
+    br_fg: Color,
     border: Color = FG_BORDER,
 ) -> None:
-    """Draw a square cell — 4 chars wide, 2 rows tall.
+    """Draw a square cell — 8 chars wide, 4 rows tall.
 
-      TL TR . .
-      BL BR . .
+        +------+
+        | TL TR|
+        | BL BR|
+        +------+
+
+    Content at cols 2 and 5 (same positions as hex cell).
     """
-    canvas.put(cc,     cr,   tl_ch, fg=tl_fg,  bg=bg)
-    canvas.put(cc + 1, cr,   tr_ch, fg=tr_fg,  bg=bg)
-    canvas.put(cc + 2, cr,   " ",   fg=border, bg=bg)
-    canvas.put(cc + 3, cr,   " ",   fg=border, bg=bg)
-    canvas.put(cc,     cr+1, bl_ch, fg=bl_fg,  bg=bg)
-    canvas.put(cc + 1, cr+1, br_ch, fg=br_fg,  bg=bg)
-    canvas.put(cc + 2, cr+1, " ",   fg=border, bg=bg)
-    canvas.put(cc + 3, cr+1, " ",   fg=border, bg=bg)
+    N = _NO_COLOR
+    # row 0: top border
+    canvas.put(canvas_col, canvas_row, "+", fg=border, bg=N)
+    canvas.put(canvas_col + 1, canvas_row, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 2, canvas_row, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 3, canvas_row, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 4, canvas_row, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 5, canvas_row, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 6, canvas_row, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 7, canvas_row, "+", fg=border, bg=N)
+    # row 1: top content row
+    canvas.put(canvas_col, canvas_row + 1, "|", fg=border, bg=N)
+    canvas.put(canvas_col + 1, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 2, canvas_row + 1, tl_ch, fg=tl_fg, bg=bg)
+    canvas.put(canvas_col + 3, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 4, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 5, canvas_row + 1, tr_ch, fg=tr_fg, bg=bg)
+    canvas.put(canvas_col + 6, canvas_row + 1, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 7, canvas_row + 1, "|", fg=border, bg=N)
+    # row 2: bottom content row
+    canvas.put(canvas_col, canvas_row + 2, "|", fg=border, bg=N)
+    canvas.put(canvas_col + 1, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 2, canvas_row + 2, bl_ch, fg=bl_fg, bg=bg)
+    canvas.put(canvas_col + 3, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 4, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 5, canvas_row + 2, br_ch, fg=br_fg, bg=bg)
+    canvas.put(canvas_col + 6, canvas_row + 2, " ", fg=FG_CONTENT, bg=bg)
+    canvas.put(canvas_col + 7, canvas_row + 2, "|", fg=border, bg=N)
+    # row 3: bottom border
+    canvas.put(canvas_col, canvas_row + 3, "+", fg=border, bg=N)
+    canvas.put(canvas_col + 1, canvas_row + 3, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 2, canvas_row + 3, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 3, canvas_row + 3, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 4, canvas_row + 3, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 5, canvas_row + 3, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 6, canvas_row + 3, "-", fg=border, bg=N)
+    canvas.put(canvas_col + 7, canvas_row + 3, "+", fg=border, bg=N)
+
+
+# ---------------------------------------------------------------------------
+# Pure coordinate helpers
+# ---------------------------------------------------------------------------
+
+
+def _nearest(base: int, ctr: int, period: int) -> int:
+    """Shift base by a multiple of period to land closest to ctr."""
+    d = (base - ctr) % period
+    if d > period // 2:
+        d -= period
+    return ctr + d
+
+
+def _tile_layout(
+    tiles: list[dict],
+    map_width: int,
+    map_height: int,
+    topology_id: int,
+    gui_col_center: int,
+    gui_row_center: int,
+    viewport_cols: int,
+    viewport_rows: int,
+    wrap_x: bool = True,
+    wrap_y: bool = False,
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Pure coordinate mapping. Returns {(mx, my): (canvas_col, canvas_row)}
+    for every tile that falls inside the viewport. No drawing.
+    """
+    gui_col_wrap_period = _gui_col_wrap_period(topology_id, map_width)
+    gui_row_wrap_period = _gui_row_wrap_period(topology_id, map_height)
+    gui_col_tile_step = 6 if topology_id in (2, 3) else 7
+    cell_half_width, cell_half_height = 4, 2
+    gui_col_viewport_origin = gui_col_center + cell_half_width - viewport_cols // 2
+    gui_row_viewport_origin = gui_row_center + cell_half_height - viewport_rows // 2
+    gui_col_lo, gui_col_hi = (
+        gui_col_viewport_origin - gui_col_tile_step,
+        gui_col_viewport_origin + viewport_cols,
+    )
+    gui_row_lo, gui_row_hi = (
+        gui_row_viewport_origin - cell_half_height,
+        gui_row_viewport_origin + viewport_rows,
+    )
+
+    result: dict[tuple[int, int], tuple[int, int]] = {}
+    for t in tiles:
+        mx, my = t["x"], t["y"]
+        gui_col_base, gui_row_base = _gui_pos(mx, my, topology_id)
+        gui_col, gui_row = gui_col_base, gui_row_base
+
+        if wrap_x:
+            gui_col = _nearest(gui_col_base, gui_col_center, gui_col_wrap_period)
+        if wrap_y:
+            gui_row = _nearest(gui_row_base, gui_row_center, gui_row_wrap_period)
+
+        if gui_col_lo <= gui_col < gui_col_hi and gui_row_lo <= gui_row < gui_row_hi:
+            result[(mx, my)] = (
+                gui_col - gui_col_viewport_origin,
+                gui_row - gui_row_viewport_origin,
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Main renderer
 # ---------------------------------------------------------------------------
+
 
 def render_map_centered(
     tiles: list[dict],
@@ -283,14 +456,15 @@ def render_map_centered(
     map_width: int,
     map_height: int,
     topology_id: int,
-    gc_ctr: int,
-    gr_ctr: int,
+    gui_col_center: int,
+    gui_row_center: int,
     viewport_cols: int,
     viewport_rows: int,
     wrap_x: bool = True,
     wrap_y: bool = False,
+    label_coords: bool = False,
 ) -> str:
-    """Render a viewport centred on GUI position (gc_ctr, gr_ctr).
+    """Render a viewport centred on GUI position (gui_col_center, gui_row_center).
 
     Pass GUI coords directly so callers can average in GUI space and avoid
     the iso-hex MAP-coord averaging artifact.
@@ -302,99 +476,70 @@ def render_map_centered(
         own_units_map.setdefault((u["x"], u["y"]), []).append(u["type"])
 
     use_hex = topology_id in (2, 3)
-    gc_period = _gc_x_period(topology_id, map_width)
-    gr_period = _gr_y_period(topology_id, map_height)
-
-    # Canvas always fills the full terminal so the map is centered on screen.
     canvas = MapCanvas(viewport_cols, viewport_rows)
+    tiles_by_pos = {(t["x"], t["y"]): t for t in tiles}
 
-    # Place the center tile in the middle of the canvas.
-    gc_min = gc_ctr + 2 - viewport_cols // 2
-    gr_min = gr_ctr + 1 - viewport_rows // 2
-    gc_lo, gc_hi = gc_min - 3, gc_min + viewport_cols
-    gr_lo, gr_hi = gr_min - 1, gr_min + viewport_rows
-
-    def _draw_tile(t: dict, cc: int, cr: int) -> None:
-        bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border = _cell_colors(t, own_units_map)
-        if use_hex:
-            _draw_hex_cell(canvas, cc, cr, bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border)
+    def _draw_tile(t: dict, canvas_col: int, canvas_row: int) -> None:
+        if label_coords:
+            known = t.get("known", 0)
+            bg = terrain_bg(t.get("terrain") or "") if known == 2 else BG_UNKNOWN
+            tl_ch, tl_fg = str(t["x"]), FG_CONTENT
+            tr_ch, tr_fg = str(t["y"]), FG_CONTENT
+            bl_ch, bl_fg = " ", FG_CONTENT
+            br_ch, br_fg = " ", FG_CONTENT
+            border = FG_BORDER_VISIBLE
         else:
-            _draw_square_cell(canvas, cc, cr, bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border)
-
-    def _nearest(base: int, ctr: int, period: int) -> int:
-        """Shift base by a multiple of period to land closest to ctr."""
-        d = (base - ctr) % period
-        if d > period // 2:
-            d -= period
-        return ctr + d
-
-    for t in tiles:
-        mx, my = t["x"], t["y"]
-        gc_base, gr_base = _gui_pos(mx, my, topology_id)
-
-        gc = _nearest(gc_base, gc_ctr, gc_period) if wrap_x else gc_base
-        gr = _nearest(gr_base, gr_ctr, gr_period) if wrap_y else gr_base
-
-        if gc_lo <= gc < gc_hi and gr_lo <= gr < gr_hi:
-            _draw_tile(t, gc - gc_min, gr - gr_min)
-
-    return canvas.render()
-
-
-# ---------------------------------------------------------------------------
-# Legacy range-based renderer (kept for 'map x1:x2 y1:y2' command)
-# ---------------------------------------------------------------------------
-
-def render_isohex(
-    tiles: list[dict],
-    units: list[dict],
-    map_width: int = 0,   # noqa: ARG001 (unused; kept for call-site compatibility)
-    map_height: int = 0,  # noqa: ARG001
-    x_range: tuple[int, int] | None = None,
-    y_range: tuple[int, int] | None = None,
-    topology_id: int = 3,
-) -> str:
-    """Render a MAP-coord filtered slice. x_range/y_range filter on mx/my."""
-    x_min = x_range[0] if x_range else None
-    x_max = x_range[1] if x_range else None
-    y_min = y_range[0] if y_range else None
-    y_max = y_range[1] if y_range else None
-
-    filtered: list[dict] = []
-    for t in tiles:
-        mx, my = t["x"], t["y"]
-        if x_min is not None and not (x_min <= mx < x_max):
-            continue
-        if y_min is not None and not (y_min <= my < y_max):
-            continue
-        filtered.append(t)
-
-    if not filtered:
-        return "(no tiles in range)"
-
-    all_gc = [_gui_pos(t["x"], t["y"], topology_id)[0] for t in filtered]
-    all_gr = [_gui_pos(t["x"], t["y"], topology_id)[1] for t in filtered]
-    gc_min, gc_max = min(all_gc), max(all_gc)
-    gr_min, gr_max = min(all_gr), max(all_gr)
-
-    canvas_cols = (gc_max - gc_min) + 4 + 4
-    canvas_rows = (gr_max - gr_min) + 2 + 2
-    canvas = MapCanvas(canvas_cols, canvas_rows)
-
-    own_units_map: dict[tuple[int, int], list[str]] = {}
-    for u in units:
-        own_units_map.setdefault((u["x"], u["y"]), []).append(u["type"])
-
-    use_hex = topology_id in (2, 3)
-    for t in filtered:
-        gc, gr = _gui_pos(t["x"], t["y"], topology_id)
-        cc = gc - gc_min
-        cr = gr - gr_min
-        bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border = _cell_colors(t, own_units_map)
+            bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border = (
+                _cell_colors(t, own_units_map)
+            )
         if use_hex:
-            _draw_hex_cell(canvas, cc, cr, bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border)
+            _draw_hex_cell(
+                canvas,
+                canvas_col,
+                canvas_row,
+                bg,
+                tl_ch,
+                tl_fg,
+                tr_ch,
+                tr_fg,
+                bl_ch,
+                bl_fg,
+                br_ch,
+                br_fg,
+                border,
+            )
         else:
-            _draw_square_cell(canvas, cc, cr, bg, tl_ch, tl_fg, tr_ch, tr_fg, bl_ch, bl_fg, br_ch, br_fg, border)
+            _draw_square_cell(
+                canvas,
+                canvas_col,
+                canvas_row,
+                bg,
+                tl_ch,
+                tl_fg,
+                tr_ch,
+                tr_fg,
+                bl_ch,
+                bl_fg,
+                br_ch,
+                br_fg,
+                border,
+            )
+
+    layout = _tile_layout(
+        tiles,
+        map_width,
+        map_height,
+        topology_id,
+        gui_col_center,
+        gui_row_center,
+        viewport_cols,
+        viewport_rows,
+        wrap_x,
+        wrap_y,
+    )
+    for (mx, my), (canvas_col, canvas_row) in layout.items():
+        t = tiles_by_pos[(mx, my)]
+        _draw_tile(t, canvas_col, canvas_row)
 
     return canvas.render()
 
@@ -404,18 +549,27 @@ def render_isohex_centered(
     units: list[dict],
     map_width: int,
     map_height: int,
-    gc_ctr: int,
-    gr_ctr: int,
+    gui_col_center: int,
+    gui_row_center: int,
     viewport_cols: int,
     viewport_rows: int,
     topology_id: int = 3,
     wrap_x: bool = True,
     wrap_y: bool = False,
 ) -> str:
-    """Wrapper around render_map_centered. Center in GUI coords (gc, gr)."""
+    """Wrapper around render_map_centered. Center in GUI coords (gui_col, gui_row)."""
     return render_map_centered(
-        tiles, units, map_width, map_height, topology_id,
-        gc_ctr, gr_ctr, viewport_cols, viewport_rows, wrap_x=wrap_x, wrap_y=wrap_y,
+        tiles,
+        units,
+        map_width,
+        map_height,
+        topology_id,
+        gui_col_center,
+        gui_row_center,
+        viewport_cols,
+        viewport_rows,
+        wrap_x=wrap_x,
+        wrap_y=wrap_y,
     )
 
 
@@ -448,31 +602,38 @@ def units_panel_lines(units: list[dict]) -> list[str]:
     return lines
 
 
-def parse_map_range(token: str) -> tuple[int, int]:
-    parts = token.split(":")
-    if len(parts) != 2:
-        raise ValueError(f"expected 'a:b', got {token!r}")
-    return int(parts[0]), int(parts[1])
-
-
 def map_legend() -> str:
     R = MAP_RESET
     lines: list[str] = []
 
     lines.append("=== Map Legend ===")
 
-    lines.append("Terrain:")
+    terrain_entries = []
     for name, color in sorted(_TERRAIN_BG.items()):
-        if name in ("coast",):
+        if name == "coast":
             continue
         swatch = f"{_bg(color)}{_fg(FG_CONTENT)}   {R}"
-        lines.append(f"  {swatch} {name.capitalize()}")
-    unknown = f"{_bg(BG_UNKNOWN)}{_fg(FG_CONTENT)}   {R}"
-    lines.append(f"  {unknown} Unexplored/fogged")
+        terrain_entries.append(f"{swatch} {name.capitalize()}")
+    unknown = f"{_bg(BG_UNKNOWN)}{_fg(FG_CONTENT)}   {R} Unexplored/fogged"
+    terrain_entries.append(unknown)
+
+    lines.append("Terrain:")
+    terrain_width = max((visible_len(entry) for entry in terrain_entries), default=0)
+    for start in range(0, len(terrain_entries), 3):
+        chunk = terrain_entries[start:start + 3]
+        lines.append("  " + "  ".join(rpad(entry, terrain_width) for entry in chunk))
 
     lines.append("Slots (TL=city, TR/BL/BR=units):")
-    lines.append(f"  {_fg(FG_CITY)}R{R} city initial (gold)")
-    lines.append(f"  {_fg(FG_OWN_UNIT)}S{R} own unit initial (cyan)  {_fg(FG_OWN_UNIT)}3{R} count if overflow")
-    lines.append(f"  {_fg(FG_ENEMY)}u{R} enemy unit  {_fg(FG_ENEMY)}4{R} enemy count")
+    lines.append(
+        "  "
+        f"{_fg(FG_CITY)}R{R} city"
+        f"  {_fg(FG_OWN_UNIT)}S{R} own unit"
+        f"  {_fg(FG_OWN_UNIT)}3{R} own overflow"
+    )
+    lines.append(
+        "  "
+        f"{_fg(FG_ENEMY)}u{R} enemy unit"
+        f"  {_fg(FG_ENEMY)}4{R} enemy count"
+    )
 
     return "\n".join(lines)

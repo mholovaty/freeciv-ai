@@ -1,4 +1,4 @@
-# Tutorial 02 — Scaling the Action Space
+# Tutorial — Scaling the Action Space
 
 This tutorial discusses how the current flat integer action encoding works, where it breaks down as the task grows more complex, and what alternative encodings survive extension without invalidating trained checkpoints or model architecture.
 
@@ -115,5 +115,5 @@ The jump from flat integers to action masking requires only a few lines of chang
 
 ## Next Steps
 
-- **Tutorial 03**: Running a trained agent against a live server, including multi-agent setups (`03-play.md`).
+- **Tutorial**: Running a trained agent against a live server, including multi-agent setups (`play.md`).
 - **Tutorial 04** (planned): Add a CNN over the map instead of a flat MLP for spatial reasoning.

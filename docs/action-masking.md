@@ -1,4 +1,4 @@
-# Tutorial 04 — Action Masking: Teaching the Agent What Is Possible
+# Tutorial — Action Masking: Teaching the Agent What Is Possible
 
 This tutorial explains **action masking** — what it is, why it matters, and exactly how it is implemented across the Freeciv AI codebase.
 

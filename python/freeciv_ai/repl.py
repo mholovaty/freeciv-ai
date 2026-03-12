@@ -12,7 +12,6 @@ Usage::
 
 import argparse
 import asyncio
-import io
 import logging
 import shutil
 import sys
@@ -34,8 +33,8 @@ except ImportError:
 import signal
 
 from freeciv_ai.map_renderer import (
-    map_legend, parse_map_range, rpad,
-    render_isohex, render_isohex_centered,
+    map_legend, rpad,
+    render_isohex_centered,
     units_panel_lines, visible_len,
 )
 
@@ -276,6 +275,8 @@ def cmd_cities(client: FreecivClient) -> None:
 
 def _wrapped_avg(values: list[int], size: int) -> int:
     """Wrap-aware average — correct across the seam (e.g. x=0 and x=15 → 15/0 not 7)."""
+    if size <= 0:
+        return round(sum(values) / len(values))
     ref = values[0]
     adjusted = []
     for v in values:
@@ -283,17 +284,17 @@ def _wrapped_avg(values: list[int], size: int) -> int:
         if d > size // 2:
             d -= size
         adjusted.append(ref + d)
-    return round(sum(adjusted) / len(adjusted)) % size
+    return round(sum(adjusted) / len(adjusted))
 
 
 def _init_map_center(client: "FreecivClient") -> None:
     """Set _map_center to the wrap-aware GUI-coord average of player units.
 
-    We average in GUI (gc, gr) space, not MAP space, because for iso-hex
-    the visual position is gc=(mx-my)*3 and averaging MAP x/y independently
+    We average in GUI (gui_col, gui_row) space, not MAP space, because for iso-hex
+    the visual position is gui_col=(mx-my)*6 and averaging MAP x/y independently
     produces the wrong visual midpoint when units straddle the diagonal.
     """
-    from freeciv_ai.map_renderer import _gc_x_period, _gr_y_period, _gui_pos
+    from freeciv_ai.map_renderer import _gui_col_wrap_period, _gui_row_wrap_period, _gui_pos
     global _map_center
     units = client.get_units()
     if not units:
@@ -301,22 +302,29 @@ def _init_map_center(client: "FreecivClient") -> None:
     topo = client.map_topology_id
     map_w = client.map_width
     map_h = client.map_height
-    gc_period = _gc_x_period(topo, map_w)
-    gr_period = _gr_y_period(topo, map_h)
-    gc_vals = [_gui_pos(u["x"], u["y"], topo)[0] for u in units]
-    gr_vals = [_gui_pos(u["x"], u["y"], topo)[1] for u in units]
-    _map_center = (_wrapped_avg(gc_vals, gc_period), _wrapped_avg(gr_vals, gr_period))
+    gui_col_wrap_period = _gui_col_wrap_period(topo, map_w)
+    gui_row_wrap_period = _gui_row_wrap_period(topo, map_h)
+    gui_col_vals = [_gui_pos(u["x"], u["y"], topo)[0] for u in units]
+    gui_row_vals = [_gui_pos(u["x"], u["y"], topo)[1] for u in units]
+    _map_center = (_wrapped_avg(gui_col_vals, gui_col_wrap_period), _wrapped_avg(gui_row_vals, gui_row_wrap_period))
+
+
+def _ensure_map_center(client: "FreecivClient") -> None:
+    global _map_center
+    if _map_center is None and client.get_units():
+        _init_map_center(client)
 
 
 def _render_current_map(client: "FreecivClient", cols: int, rows: int) -> str:
     """Render map centered at _map_center, sized to cols×rows."""
     from freeciv_ai.map_renderer import _gui_pos as _map_gui_pos
+    _ensure_map_center(client)
     topo = client.map_topology_id
     wrap = client.map_wrap_id
     if _map_center is not None:
-        gc_ctr, gr_ctr = _map_center
+        gui_col_center, gui_row_center = _map_center
     else:
-        gc_ctr, gr_ctr = _map_gui_pos(client.map_width // 2, client.map_height // 2, topo)
+        gui_col_center, gui_row_center = _map_gui_pos(client.map_width // 2, client.map_height // 2, topo)
     tiles = client.get_map()
     # Enrich tiles: tile city_name can be empty if the city-info packet hasn't
     # been processed yet but the city already appears in the player's city list.
@@ -327,25 +335,46 @@ def _render_current_map(client: "FreecivClient", cols: int, rows: int) -> str:
     return render_isohex_centered(
         tiles, client.get_units(),
         client.map_width, client.map_height,
-        gc_ctr, gr_ctr, cols, rows, topology_id=topo,
+        gui_col_center, gui_row_center, cols, rows, topology_id=topo,
         wrap_x=bool(wrap & 1), wrap_y=bool(wrap & 2),
     )
 
 
 def _render_display_view(client: "FreecivClient", cols: int, rows: int) -> str:
-    """Render the side-by-side map | legend+cities+units display, sized to cols×rows."""
-    legend_lines = map_legend().splitlines()
+    """Render the side-by-side map | cities+units display, sized to cols×rows."""
+    def _fit_lines(lines: list[str], target: int, *, center: bool) -> list[str]:
+        if target <= 0:
+            return []
+        if len(lines) >= target:
+            if center:
+                start = max(0, (len(lines) - target) // 2)
+                return lines[start:start + target]
+            return lines[:target]
+        pad = target - len(lines)
+        if center:
+            top = pad // 2
+            return [""] * top + lines + [""] * (pad - top)
+        return lines + [""] * pad
+
     cities_lines = cities_panel_lines(client.get_cities())
     units_lines = units_panel_lines(client.get_units())
-    right_lines = legend_lines + [""] + cities_lines + [""] + units_lines
+    right_lines: list[str] = []
+    for section in (cities_lines, units_lines):
+        if not section:
+            continue
+        if right_lines:
+            right_lines.append("")
+        right_lines.extend(section)
     right_width = max((visible_len(l) for l in right_lines), default=0)
     sep = " \033[90m|\033[0m "
     sep_vis = 3
     map_cols = max(20, cols - right_width - sep_vis)
     map_str = _render_current_map(client, map_cols, max(4, rows - 1))
     map_lines = map_str.splitlines()
+    height = max(1, rows)
+    map_lines = _fit_lines(map_lines, height, center=True)
+    right_lines = _fit_lines(right_lines, height, center=False)
     map_vis_w = visible_len(map_lines[0]) if map_lines else map_cols
-    height = max(len(map_lines), len(right_lines))
     out = []
     for i in range(height):
         ml = map_lines[i] if i < len(map_lines) else ""
@@ -354,148 +383,23 @@ def _render_display_view(client: "FreecivClient", cols: int, rows: int) -> str:
     return "\n".join(out)
 
 
-def cmd_map(client: FreecivClient, args: list[str]) -> None:
-    """map [x1:x2 y1:y2] | map center <x> <y> | map legend"""
-    if args and args[0] == "legend":
-        print(map_legend())
-        return
-
-    topo = client.map_topology_id
-    global _map_center
-
-    tiles = client.get_map()
-    units = client.get_units()
-    from freeciv_ai.map_renderer import _gc_x_period, _gr_y_period, _gui_pos as _map_gui_pos
-    gc_period = _gc_x_period(topo, client.map_width)
-    gr_period = _gr_y_period(topo, client.map_height)
-    wrap = client.map_wrap_id
-
-    def _render_centered(gc: int, gr: int) -> str:
-        term = shutil.get_terminal_size(fallback=(80, 24))
-        return render_isohex_centered(
-            tiles, units, client.map_width, client.map_height,
-            gc, gr, term.columns, term.lines, topology_id=topo,
-            wrap_x=bool(wrap & 1), wrap_y=bool(wrap & 2),
-        )
-
-    # Handle "map center [x y]" — set view centre from MAP coords
-    if args and args[0] == "center":
-        coord_tokens = [a.rstrip(",") for a in args[1:] if a.rstrip(",")]
-        if len(coord_tokens) >= 2:
-            try:
-                mx, my = int(coord_tokens[0]), int(coord_tokens[1])
-            except ValueError:
-                print("x and y must be integers.")
-                return
-            _map_center = _map_gui_pos(mx, my, topo)
-        elif len(coord_tokens) == 0 and _map_center is None:
-            print("Centre not set. Usage: map center <mx> <my>  (MAP coordinates)")
-            return
-        gc, gr = _map_center  # type: ignore[misc]
-        print(_render_centered(gc, gr))
-        return
-
-    # No args → centred render (use stored centre or map midpoint as fallback)
-    if not args:
-        if _map_center is not None:
-            gc, gr = _map_center
-        else:
-            gc, gr = _map_gui_pos(client.map_width // 2, client.map_height // 2, topo)
-        print(_render_centered(gc, gr))
-        return
-
-    # Two plain integers (no ':') = pan delta in MAP coords
-    if (len(args) == 2
-            and ":" not in args[0] and ":" not in args[1]
-            and args[0] not in ("center", "legend")):
-        try:
-            dx, dy = int(args[0]), int(args[1])
-        except ValueError:
-            pass
-        else:
-            if _map_center is None:
-                print("No centre set. Use 'map center <mx> <my>' first.")
-                return
-            gc, gr = _map_center
-            dgc, dgr = _map_gui_pos(dx, dy, topo)  # delta in GUI space
-            _map_center = ((gc + dgc) % gc_period, (gr + dgr) % gr_period)
-            gc, gr = _map_center
-            print(_render_centered(gc, gr))
-            return
-
-    # Slice render (MAP coord ranges)
-    x_range: tuple[int, int] | None = None
-    y_range: tuple[int, int] | None = None
-
-    if len(args) >= 1:
-        try:
-            x_range = parse_map_range(args[0])
-        except ValueError as e:
-            print(f"Bad x range: {e}")
-            print("Usage: map [x1:x2 y1:y2]  |  map <dx> <dy>  |  map center <mx> <my>")
-            return
-    if len(args) >= 2:
-        try:
-            y_range = parse_map_range(args[1])
-        except ValueError as e:
-            print(f"Bad y range: {e}")
-            print("Usage: map [x1:x2 y1:y2]  |  map <dx> <dy>  |  map center <mx> <my>")
-            return
-
-    print(render_isohex(
-        tiles, units, client.map_width, client.map_height,
-        x_range, y_range, topology_id=topo,
-    ))
 
 
 def cmd_display(client: "FreecivClient") -> None:
-    """display — side-by-side: map | legend + units, auto-sized to terminal."""
-    topo = client.map_topology_id
-
+    """display — side-by-side: map | cities + units, auto-sized to terminal."""
     term = shutil.get_terminal_size(fallback=(160, 40))
+    print(_render_display_view(client, term.columns, max(4, term.lines - 1)))
 
-    # Build right panel: legend, cities, units
-    legend_lines = map_legend().splitlines()
-    cities_lines = cities_panel_lines(client.get_cities())
-    units_lines  = units_panel_lines(client.get_units())
-    right_lines  = legend_lines + [""] + cities_lines + [""] + units_lines
-    right_width  = max((visible_len(l) for l in right_lines), default=0)
 
-    # Map panel gets the remaining width
-    sep = " [90m|[0m "
-    sep_vis = 3  # " | "
-    map_cols = max(20, term.columns - right_width - sep_vis)
-    map_rows = max(4, term.lines - 1)
+def cmd_map_legend() -> None:
+    """map legend — print the compact map legend to the console."""
+    print(map_legend())
 
-    tiles = client.get_map()
-    units = client.get_units()
-    city_names = {c["id"]: c["name"] for c in client.get_cities() if c["name"]}
-    for t in tiles:
-        if t["city_id"] >= 0 and not t.get("city_name") and t["city_id"] in city_names:
-            t["city_name"] = city_names[t["city_id"]]
 
-    from freeciv_ai.map_renderer import _gui_pos as _map_gui_pos
-    if _map_center is not None:
-        gc_ctr, gr_ctr = _map_center
-    else:
-        gc_ctr, gr_ctr = _map_gui_pos(client.map_width // 2, client.map_height // 2, topo)
-
-    wrap = client.map_wrap_id
-    map_str   = render_isohex_centered(
-        tiles, units, client.map_width, client.map_height,
-        gc_ctr, gr_ctr, map_cols, map_rows, topology_id=topo,
-        wrap_x=bool(wrap & 1), wrap_y=bool(wrap & 2),
-    )
-    map_lines = map_str.splitlines()
-    map_vis_w = visible_len(map_lines[0]) if map_lines else map_cols
-
-    height = max(len(map_lines), len(right_lines))
-    rows: list[str] = []
-    for i in range(height):
-        ml = map_lines[i]   if i < len(map_lines)   else ""
-        rl = right_lines[i] if i < len(right_lines) else ""
-        rows.append(rpad(ml, map_vis_w) + sep + rl)
-    print("\n".join(rows))
+def cmd_map(client: "FreecivClient") -> None:
+    """map — render the current centered map using the display renderer."""
+    term = shutil.get_terminal_size(fallback=(160, 40))
+    print(_render_current_map(client, term.columns, max(4, term.lines - 1)))
 
 
 class _AIState:
@@ -719,7 +623,7 @@ def cmd_help() -> None:
         "    allunits               — list all visible units (own + enemy)\n"
         "    cities                 — list your cities\n"
         "    tile <x> <y>           — show tile info and units at (x,y)\n"
-        "    m / move <id> <dir>    — move unit one step: N NE E SE S SW W NW\n"
+        "    m / move <id> <dir>    — move unit one step (valid dirs depend on topology)\n"
         "    g / go <id> <x> <y>   — move unit to tile\n"
         "    e / end                — end your turn\n"
         "\n"
@@ -732,11 +636,9 @@ def cmd_help() -> None:
         "  Other:\n"
         "    poll                   — process server packets\n"
         "    topology               — show map topology and dimensions\n"
-        "    display                — map + legend + units side by side (auto-sized)\n"
-        "    map [x1:x2 y1:y2]     — render iso-hex map (slice in native coords)\n"
-        "    map <dx> <dy>          — pan view by delta (e.g. map 2 -3)\n"
-        "    map center <x> <y>    — set view centre and render\n"
-        "    map legend             — show map colour/symbol legend\n"
+        "    display                — map + cities + units side by side (auto-sized)\n"
+        "    map                    — render the current centered map\n"
+        "    map legend             — print the compact map colour/symbol legend\n"
         "    server <cmd>           — send a server command (requires hack level)\n"
         "    hack                   — check hack access level\n"
         "    h / help               — show this message\n"
@@ -753,20 +655,31 @@ def cmd_move(client: FreecivClient, args: list[str]) -> None:
     """move <unit_id> <direction>   direction: N NE E SE S SW W NW"""
     # Matches freeciv enum direction8: NW=0 N=1 NE=2 W=3 E=4 SW=5 S=6 SE=7
     dirs = {"nw": 0, "n": 1, "ne": 2, "w": 3, "e": 4, "sw": 5, "s": 6, "se": 7}
+    valid_dirs = ["N", "E", "S", "W", "NE", "SE", "SW", "NW"]
+    if client.map_topology_id == 2:
+        valid_dirs = ["N", "NE", "E", "S", "SW", "W"]
+    elif client.map_topology_id == 3:
+        valid_dirs = ["NW", "N", "E", "SE", "S", "W"]
+    valid_dir_set = {name.lower() for name in valid_dirs}
+    valid_dir_text = " ".join(valid_dirs)
     # dx,dy offsets for each direction number
     _deltas = {0: (-1,-1), 1: (0,-1), 2: (1,-1), 3: (-1,0),
                4: (1,0),  5: (-1,1), 6: (0,1),  7: (1,1)}
     if len(args) != 2:
-        print("Usage: move <unit_id> <N|NE|E|SE|S|SW|W|NW>")
+        print(f"Usage: move <unit_id> <{'|'.join(valid_dirs)}>")
+        return
+    dir_name = args[1].lower()
+    d = dirs.get(dir_name)
+    if d is None:
+        print(f"Unknown direction '{args[1]}'. Use: {valid_dir_text}")
+        return
+    if dir_name not in valid_dir_set:
+        print(f"Direction {args[1].upper()} is invalid on this topology. Use: {valid_dir_text}")
         return
     try:
         uid = int(args[0])
     except ValueError:
         print(f"Invalid unit id: {args[0]}")
-        return
-    d = dirs.get(args[1].lower())
-    if d is None:
-        print(f"Unknown direction '{args[1]}'. Use: N NE E SE S SW W NW")
         return
     unit = next((u for u in client.get_units() if u["id"] == uid), None)
     if unit is None:
@@ -788,7 +701,7 @@ def cmd_move(client: FreecivClient, args: list[str]) -> None:
         for act in (Actions.UNIT_MOVE, Actions.UNIT_MOVE2, Actions.UNIT_MOVE3)
     )
     if not can_move:
-        print(f"Unit {uid} cannot move {args[1].upper()} (terrain or rules prevent it).")
+        print(f"Unit {uid} cannot move {args[1].upper()} (terrain, zone of control, or rules prevent it).")
         return
     client.move_unit(uid, d)
 
@@ -1034,25 +947,18 @@ async def _dispatch_command(
         else:
             cmd_display(client)
     elif cmd == "map":
-        if _tui is not None:
-            if tokens[1:] and tokens[1] == "legend":
-                # Legend is text — show in log pane, don't change view mode
-                _tui.append_log(map_legend())
-            else:
-                # Capture cmd_map (updates _map_center), then render current view
-                _old_out = sys.stdout
-                _buf = io.StringIO()
-                sys.stdout = _buf
-                try:
-                    cmd_map(client, tokens[1:])
-                finally:
-                    sys.stdout = _old_out
+        if len(tokens) == 1:
+            if _tui is not None:
                 _tui._view_mode = "map"
                 term = shutil.get_terminal_size(fallback=(80, 24))
                 map_rows = max(4, int(term.lines * 2 / 3))
                 _tui.update_map(_render_current_map(client, term.columns, map_rows))
+            else:
+                cmd_map(client)
+        elif len(tokens) == 2 and tokens[1].lower() == "legend":
+            cmd_map_legend()
         else:
-            cmd_map(client, tokens[1:])
+            print("Usage: map | map legend")
     elif cmd == "server":
         if len(tokens) < 2:
             print("Usage: server <server command>")
@@ -1338,6 +1244,13 @@ async def main() -> None:
             # currently visible before handing control to the REPL.
             for _ in range(100):  # up to ~5 s
                 if any(t["known"] == 2 for t in client.get_map()):
+                    break
+                await asyncio.sleep(0.05)
+
+            # Starting units may arrive a little after the first visible-tile
+            # packets. Give them a short chance to land before the first render.
+            for _ in range(40):  # up to ~2 s
+                if client.get_units():
                     break
                 await asyncio.sleep(0.05)
 
