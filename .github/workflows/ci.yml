@@ -5,13 +5,18 @@ on:
     branches: [main, master]
   pull_request:
 
-# ACT is set to 'true' by the act tool when running locally.
-# Declaring it here makes it a known workflow variable so schema
-# validators accept env.ACT references in job-level conditions.
-env:
-  ACT: ''
-
 jobs:
+  # Detects whether we are running inside the 'act' local runner.
+  # Exposes the result as a job output so other jobs can use the
+  # 'needs' context (which act's schema validator accepts at job level,
+  # unlike the 'env' context).
+  detect-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      is-act: ${{ steps.check.outputs.is-act }}
+    steps:
+      - id: check
+        run: echo "is-act=${ACT:-false}" >> $GITHUB_OUTPUT
   build-and-test:
     runs-on: ubuntu-latest
 
@@ -73,8 +78,9 @@ jobs:
   # This job does not run correctly with 'act' — it requires the real
   # GitHub Actions environment to download the CodeQL bundle and upload results.
   codeql:
+    needs: detect-runner
+    if: needs.detect-runner.outputs.is-act != 'true'
     runs-on: ubuntu-latest
-    if: env.ACT != 'true'
     permissions:
       security-events: write
       actions: read
