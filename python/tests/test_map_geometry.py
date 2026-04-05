@@ -15,7 +15,7 @@ the same mental model as the code). The STRUCTURAL tests are more reliable.
 """
 
 import pytest
-from freeciv_ai.map_renderer import _gui_pos, _gui_col_wrap_period, _gui_row_wrap_period, _nearest, _tile_layout
+from freeciv_ai.map_renderer import _gui_pos, _gui_col_wrap_period, _gui_row_wrap_period, _tile_layout
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ class TestTileLayout:
             assert layout_wrap[key][0] > 4, f"x=0 tile {key} should be right of center with wrap"
 
     def test_topo3_wrap_x_preserves_gui_row(self):
-        W, H = 16, 24
+        W, _ = 16, 24
         topo = 3
         base = _gui_pos(4, 12, topo)
         wrapped = _gui_pos(4 + W, 12 - W, topo)

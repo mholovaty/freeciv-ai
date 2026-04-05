@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # Build the C library and run the Python test suite
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Get freeciv submodule SHA
+        id: freeciv-sha
+        run: echo "sha=$(git -C freeciv rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      # Cache the entire meson builddir.  Key includes the freeciv SHA (so a
+      # submodule bump invalidates it) and a hash of our own source files.
+      - uses: actions/cache@v5
+        with:
+          path: builddir
+          key: builddir-${{ runner.os }}-${{ steps.freeciv-sha.outputs.sha }}-${{ hashFiles('meson.build', 'src/**') }}
+          restore-keys: builddir-${{ runner.os }}-${{ steps.freeciv-sha.outputs.sha }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            meson ninja-build \
+            libsdl2-dev libsdl2-mixer-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            liblua5.4-dev \
+            libcurl4-openssl-dev \
+            gettext
+
+      - name: Configure
+        run: meson setup builddir
+
+      # Build the freeciv subproject first so that generated headers
+      # (version_gen.h, specenum_gen.h, …) exist before the top-level
+      # build compiles our sources.  Without this, ninja starts our
+      # compilations in parallel with the freeciv custom_target, racing
+      # against the header generation.
+      - name: Build freeciv subproject
+        run: meson compile -C builddir/freeciv
+
+      - name: Build
+        run: meson compile -C builddir
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Python package
+        run: pip install -e "python/[dev]"
+
+      - name: Test
+        working-directory: python
+        run: |
+          python3 -m pytest -v \
+            --ignore=tests/test_env.py \
+            --ignore=tests/test_smoke.py
+
+  # Static analysis: clang-tidy on C sources, ruff on Python
+  static-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Get freeciv submodule SHA
+        id: freeciv-sha
+        run: echo "sha=$(git -C freeciv rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache@v5
+        with:
+          path: builddir
+          key: builddir-${{ runner.os }}-${{ steps.freeciv-sha.outputs.sha }}-${{ hashFiles('meson.build', 'src/**') }}
+          restore-keys: builddir-${{ runner.os }}-${{ steps.freeciv-sha.outputs.sha }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            meson ninja-build \
+            clang-tidy \
+            libsdl2-dev libsdl2-mixer-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            liblua5.4-dev \
+            libcurl4-openssl-dev \
+            gettext \
+            python3-pip
+
+      - name: Configure
+        run: meson setup builddir
+
+      - name: Build freeciv subproject
+        run: meson compile -C builddir/freeciv
+
+      # Generated headers (fc_config.h, specenum_gen.h, effects_enums_gen.h,
+      # tolua_*_gen.h …) live in builddir/freeciv/ and are produced by the
+      # freeciv build step.  clang-tidy needs them to analyse our sources.
+      - name: Build (required for generated headers)
+        run: meson compile -C builddir
+
+      # Checks mirror the Diagnostics.ClangTidy settings in .clangd.
+      # Only analyse our own sources — not the freeciv subproject.
+      - name: C static analysis
+        run: |
+          find src/freeciv-ai-lib -name '*.c' | xargs clang-tidy -p builddir \
+            --checks='-*,bugprone-*,cert-*,misc-*,performance-*,\
+          -modernize-*,-cppcoreguidelines-*,-google-*,-hicpp-*,\
+          -fuchsia-*,-abseil-*,-objc-*,-llvm-*,-llvmlibc-*,\
+          -bugprone-macro-parentheses,-cert-err58-cpp,\
+          -misc-non-private-member-variables-in-classes'
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Python linting
+        run: |
+          pip install ruff
+          ruff check python/

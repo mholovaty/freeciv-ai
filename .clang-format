@@ -1,0 +1,52 @@
+# Freeciv coding style — doc/CodingStyle
+# K&R with 2-space indent, 77-column limit
+
+BasedOnStyle: LLVM
+
+# Core indentation
+IndentWidth: 2
+ColumnLimit: 77
+TabWidth: 8       # existing code uses tabs at width 8
+UseTab: Never
+
+# K&R brace style: function bodies on new line, control-flow on same line
+BreakBeforeBraces: Linux
+
+# "Switch statement case labels are aligned with the enclosing switch"
+IndentCaseLabels: false
+
+# Spaces before control-flow keywords: "if (...)" not "if(...)"
+SpaceBeforeParens: ControlStatements
+
+# Pointer/reference attached to type: "void *ptr" not "void* ptr"
+PointerAlignment: Left
+
+# No collapsing short functions to one line
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+
+# "Place operators at the beginning of a line, not at the end"
+BreakBeforeBinaryOperators: All
+BreakBeforeTernaryOperators: true
+
+# Align wrapped arguments to column after '('
+AlignAfterOpenBracket: Align
+BinPackArguments: false
+BinPackParameters: false
+
+# "Do not add more than 2 empty lines between any sections"
+MaxEmptyLinesToKeep: 2
+
+# Freeciv manually groups includes with comments — do not reorder
+SortIncludes: Never
+IncludeBlocks: Preserve
+
+# Spaces around operators (already implied by LLVM base, made explicit)
+SpaceBeforeAssignmentOperators: true
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceAfterCStyleCast: false
+SpaceInEmptyParentheses: false

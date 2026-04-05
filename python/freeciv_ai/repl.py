@@ -203,7 +203,7 @@ def cmd_tile(client: FreecivClient, args: list[str]) -> None:
     if tile["city_id"] >= 0:
         print(f"  City    : {tile['city_name']} (id {tile['city_id']})")
     else:
-        print(f"  City    : None")
+        print("  City    : None")
 
     units = client.get_tile_units(x, y)
     if units:
@@ -231,7 +231,7 @@ def cmd_topology(client: FreecivClient) -> None:
         wrapping.append("X")
     if wrap & 2:
         wrapping.append("Y")
-    print(f"=== Map Topology ===")
+    print("=== Map Topology ===")
     print(f"  Size     : {client.map_width}×{client.map_height}")
     print(f"  Topology : {', '.join(flags) or 'Flat'} (id={topo})")
     print(f"  Wrapping : {'Wrap' + '+'.join(wrapping) if wrapping else 'None'} (id={wrap})")
@@ -365,7 +365,7 @@ def _render_display_view(client: "FreecivClient", cols: int, rows: int) -> str:
         if right_lines:
             right_lines.append("")
         right_lines.extend(section)
-    right_width = max((visible_len(l) for l in right_lines), default=0)
+    right_width = max((visible_len(line) for line in right_lines), default=0)
     sep = " \033[90m|\033[0m "
     sep_vis = 3
     map_cols = max(20, cols - right_width - sep_vis)

@@ -3,12 +3,7 @@
 from pathlib import Path
 import textwrap
 
-import pytest
-
-from freeciv_ai._lib import _cffi_decls, ffi
-
-
-# ---------------------------------------------------------------------------
+from freeciv_ai._lib import _cffi_decls, ffi# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

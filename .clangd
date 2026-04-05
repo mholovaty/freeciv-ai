@@ -1,2 +1,47 @@
 CompileFlags:
   CompilationDatabase: builddir
+  Remove:
+    # PCH flag is irrelevant in clangd's single-file analysis mode
+    - -Winvalid-pch
+
+Diagnostics:
+  # Freeciv uses many guarded/conditional includes (HAVE_CONFIG_H, etc.)
+  UnusedIncludes: None
+  ClangTidy:
+    Add:
+      - bugprone-*
+      - cert-*
+      - misc-*
+      - performance-*
+    Remove:
+      # Freeciv is a C codebase — suppress C++-only check families
+      - modernize-*
+      - cppcoreguidelines-*
+      - google-*
+      - hicpp-*
+      - fuchsia-*
+      - abseil-*
+      - objc-*
+      - llvm-*
+      - llvmlibc-*
+      # Freeciv's iteration macros (unit_list_iterate, etc.) trigger this constantly
+      - bugprone-macro-parentheses
+      # C++ only
+      - cert-err58-cpp
+      - misc-non-private-member-variables-in-classes
+    CheckOptions:
+      # Freeciv naming conventions (doc/CodingStyle):
+      #   functions/variables: lowercase_with_underscores
+      #   macros: UPPER_CASE
+      readability-identifier-naming.FunctionCase: lower_case
+      readability-identifier-naming.VariableCase: lower_case
+      readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+
+InlayHints:
+  Enabled: Yes
+  ParameterNames: Yes
+  DeducedTypes: No
+  Designators: No
+
+Hover:
+  ShowAKA: Yes
