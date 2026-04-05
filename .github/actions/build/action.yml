@@ -1,0 +1,52 @@
+name: Build freeciv-ai
+description: Configure and build the freeciv-ai C library
+
+inputs:
+  extra-packages:
+    description: Extra apt packages to install alongside the core build deps
+    required: false
+    default: ''
+
+runs:
+  using: composite
+
+  steps:
+    - name: Get freeciv submodule SHA
+      id: freeciv-sha
+      shell: bash
+      run: echo "sha=$(git -C freeciv rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+    - uses: actions/cache@v5
+      with:
+        path: builddir
+        key: builddir-${{ runner.os }}-${{ steps.freeciv-sha.outputs.sha }}-${{ hashFiles('meson.build', 'src/**') }}
+        restore-keys: builddir-${{ runner.os }}-${{ steps.freeciv-sha.outputs.sha }}-
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y \
+          meson ninja-build \
+          libsdl2-dev libsdl2-mixer-dev \
+          libglib2.0-dev \
+          libcairo2-dev \
+          liblua5.4-dev \
+          libcurl4-openssl-dev \
+          gettext \
+          ${{ inputs.extra-packages }}
+
+    - name: Configure
+      shell: bash
+      run: meson setup builddir
+
+    # Build the freeciv subproject first so that generated headers
+    # (version_gen.h, specenum_gen.h, ...) exist before the top-level
+    # build compiles our sources, avoiding a parallel header-generation race.
+    - name: Build freeciv subproject
+      shell: bash
+      run: meson compile -C builddir/freeciv
+
+    - name: Build
+      shell: bash
+      run: meson compile -C builddir
